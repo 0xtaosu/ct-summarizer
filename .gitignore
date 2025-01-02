@@ -1,1 +1,6 @@
 .venv
+.env
+
+webhook.log
+
+/data/twitter_data.csv

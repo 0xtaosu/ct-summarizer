@@ -7,6 +7,13 @@ import threading
 import queue
 import logging
 import os
+import time
+from openai import OpenAI
+import schedule
+from dotenv import load_dotenv
+
+# 在文件开头加载环境变量
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -93,117 +100,59 @@ def validate_twitter_data(data):
 class TwitterDataProcessor:
     def __init__(self):
         self.data_dir = "data"
-        self.twitter_file = os.path.join(self.data_dir, "twitter.csv")
+        self.twitter_file = os.path.join(self.data_dir, "twitter_data.csv")
         os.makedirs(self.data_dir, exist_ok=True)
         self.init_csv_file()
     
     def init_csv_file(self):
         """初始化CSV文件和列"""
         columns = [
-            'event_type',          # 事件类型
-            'timestamp',           # 事件时间
-            'user_id',            # 用户ID
-            'user_name',          # 用户名
-            'screen_name',        # 用户屏幕名
-            'content',            # 内容
-            'tweet_id',           # 推文ID
-            'media_type',         # 媒体类型
-            'is_retweet',         # 是否转推
-            'is_quote',           # 是否引用
-            'is_reply',           # 是否回复
-            'followers_count',     # 粉丝数
-            'friends_count',       # 关注数
-            'related_user_id',    # 相关用户ID
-            'related_user_name'   # 相关用户名
+            'timestamp',      # 事件发生时间
+            'user_name',      # 用户名
+            'event_type',     # 事件类型
+            'content'         # 内容
         ]
         
         if not os.path.exists(self.twitter_file):
             pd.DataFrame(columns=columns).to_csv(self.twitter_file, index=False)
     
-    def extract_user_info(self, user_data):
-        """提取用户信息"""
-        return {
-            'user_id': user_data.get('id_str'),
-            'user_name': user_data.get('name'),
-            'screen_name': user_data.get('screen_name'),
-            'followers_count': user_data.get('followers_count'),
-            'friends_count': user_data.get('friends_count')
-        }
-    
-    def process_new_tweet(self, data):
-        """处理新推文事件"""
-        user_info = self.extract_user_info(data['user'])
-        tweet_data = data['tweet']
+    def get_content(self, data, event_type):
+        """根据事件类型提取相应的内容"""
+        if event_type == 'new_tweet':
+            tweet = data.get('tweet', {})
+            # 如果是回复或引用，添加相关信息
+            if tweet.get('is_reply') or tweet.get('is_quote'):
+                return f"{data.get('title', '')} - {tweet.get('text', '')}"
+            return tweet.get('text', '')
         
-        return {
-            **user_info,
-            'event_type': 'new_tweet',
-            'timestamp': datetime.fromtimestamp(tweet_data['publish_time']).isoformat(),
-            'content': tweet_data['text'],
-            'tweet_id': tweet_data['tweet_id'],
-            'media_type': tweet_data.get('media_type', ''),
-            'is_retweet': tweet_data['is_retweet'],
-            'is_quote': tweet_data['is_quote'],
-            'is_reply': tweet_data['is_reply'],
-            'related_user_id': tweet_data.get('related_user_id', ''),
-            'related_user_name': ''
-        }
-    
-    def process_new_description(self, data):
-        """处理用户修改简介事件"""
-        user_info = self.extract_user_info(data['user'])
+        elif event_type == 'new_description':
+            return data.get('user', {}).get('description', '')
         
-        return {
-            **user_info,
-            'event_type': 'new_description',
-            'timestamp': datetime.fromtimestamp(data['user']['updated_at']).isoformat(),
-            'content': data['user']['description'],
-            'tweet_id': '',
-            'media_type': '',
-            'is_retweet': False,
-            'is_quote': False,
-            'is_reply': False,
-            'related_user_id': '',
-            'related_user_name': ''
-        }
-    
-    def process_new_follower(self, data):
-        """处理新关注事件"""
-        user_info = self.extract_user_info(data['user'])
-        follow_user = data.get('follow_user', {})
+        elif event_type == 'new_follower':
+            follow_user = data.get('follow_user', {})
+            return f"关注了用户: {follow_user.get('name', '')}"
         
-        return {
-            **user_info,
-            'event_type': 'new_follower',
-            'timestamp': datetime.fromtimestamp(data['user']['updated_at']).isoformat(),
-            'content': data.get('content', ''),
-            'tweet_id': '',
-            'media_type': '',
-            'is_retweet': False,
-            'is_quote': False,
-            'is_reply': False,
-            'related_user_id': follow_user.get('id_str', ''),
-            'related_user_name': follow_user.get('name', '')
-        }
-    
+        return data.get('content', '')
+
     def process_webhook_data(self, data):
         """处理webhook数据"""
         try:
             event_type = data.get('push_type', '')
+            user_data = data.get('user', {})
             
-            # 根据事件类型选择处理方法
-            processors = {
-                'new_tweet': self.process_new_tweet,
-                'new_description': self.process_new_description,
-                'new_follower': self.process_new_follower
+            # 获取事件时间
+            if event_type == 'new_tweet':
+                timestamp = datetime.fromtimestamp(data['tweet']['publish_time']).isoformat()
+            else:
+                timestamp = datetime.fromtimestamp(user_data.get('updated_at', datetime.now().timestamp())).isoformat()
+            
+            # 构建行数据
+            row = {
+                'timestamp': timestamp,
+                'user_name': user_data.get('name', ''),
+                'event_type': event_type,
+                'content': self.get_content(data, event_type)
             }
-            
-            if event_type not in processors:
-                logging.warning(f"未知的事件类型: {event_type}")
-                return False
-            
-            # 处理数据
-            row = processors[event_type](data)
             
             # 保存到CSV
             pd.DataFrame([row]).to_csv(self.twitter_file, mode='a', header=False, index=False)
@@ -248,36 +197,132 @@ def webhook_receiver():
             "message": str(e)
         }), 500
 
+class TwitterSummarizer:
+    def __init__(self):
+        # 从环境变量获取 API key
+        api_key = os.getenv('DEEPSEEK_API_KEY')
+        if not api_key:
+            raise ValueError("DEEPSEEK_API_KEY not found in environment variables")
+            
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com"
+        )
+        self.last_summary_time = {
+            '5min': datetime.now(),
+            '1hour': datetime.now(),
+            '6hour': datetime.now(),
+            '24hour': datetime.now()
+        }
+        # 启动定时任务
+        self.start_scheduled_summaries()
+    
+    def get_period_data(self, period):
+        """获取指定时间段的新数据"""
+        now = datetime.now()
+        last_time = self.last_summary_time[period]
+        
+        try:
+            df = pd.read_csv('data/twitter_data.csv')
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            new_data = df[df['timestamp'] > last_time]
+            
+            # 更新最后总结时间
+            self.last_summary_time[period] = now
+            
+            return new_data
+            
+        except Exception as e:
+            logging.error(f"获取{period}数据时出错: {str(e)}")
+            return pd.DataFrame()
+
+    def generate_summary(self, period):
+        """使用 DeepSeek 生成总结"""
+        try:
+            df = self.get_period_data(period)
+            if len(df) == 0:
+                return f"在过去{period}内没有新的推文活动"
+
+            # 准备提示信息
+            events = df.to_dict('records')
+            events_text = "\n".join([
+                f"时间: {e['timestamp']}, 用户: {e['user_name']}, "
+                f"事件: {e['event_type']}, 内容: {e['content']}"
+                for e in events
+            ])
+
+            # 根据不同时间段设置提示
+            prompts = {
+                '5min': "请简要总结最近5分钟的Twitter活动要点。",
+                '1hour': "请总结过去1小时的主要Twitter活动和趋势。",
+                '6hour': "请分析过去6小时的Twitter活动，包括热门话题和重要互动。",
+                '24hour': "请总结过去24小时的Twitter活动，分析主要话题走向。"
+            }
+
+            messages = [
+                {"role": "system", "content": prompts[period]},
+                {"role": "user", "content": f"请总结以下Twitter活动：\n{events_text}"}
+            ]
+
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                temperature=0.7,
+                stream=False
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            error_msg = f"生成{period}总结时出错: {str(e)}"
+            logging.error(error_msg)
+            return error_msg
+
+    def start_scheduled_summaries(self):
+        """启动定时总结任务"""
+        def run_schedule():
+            while True:
+                schedule.run_pending()
+                time.sleep(1)
+
+        def generate_and_print_summary(period):
+            summary = self.generate_summary(period)
+            print(f"\n=== {period} 定时总结 ===")
+            print(f"总结时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(summary)
+            print("="*50)
+
+        # 设置定时任务
+        schedule.every(5).minutes.do(lambda: generate_and_print_summary('5min'))
+        schedule.every(1).hours.do(lambda: generate_and_print_summary('1hour'))
+        schedule.every(6).hours.do(lambda: generate_and_print_summary('6hour'))
+        schedule.every(24).hours.do(lambda: generate_and_print_summary('24hour'))
+
+        # 在后台线程中运行定时任务
+        threading.Thread(target=run_schedule, daemon=True).start()
+        logging.info("定时总结任务已启动")
+
 def process_data():
     """处理队列中的数据"""
-    while True:
-        try:
-            # 从队列中获取数据
-            data = data_queue.get()
-            # 保存数据
-            analyzer.save_to_csv(data)
-            # 进行实时总结
-            print("\n=== 数据总结 ===")
-            print("5分钟总结：")
-            print(analyzer.summarize_data('5min'))
-            print("\n1小时总结：")
-            print(analyzer.summarize_data('1hour'))
-            print("\n24小时总结：")
-            print(analyzer.summarize_data('24hour'))
-        except Exception as e:
-            print(f"处理数据失败: {str(e)}")
+    try:
+        summarizer = TwitterSummarizer()
+        
+        while True:
+            try:
+                # 从队列中获取数据
+                data = data_queue.get()
+                # 保存数据
+                analyzer.save_to_csv(data)
+                
+            except Exception as e:
+                logging.error(f"处理数据失败: {str(e)}")
+    except Exception as e:
+        logging.error(f"初始化 TwitterSummarizer 失败: {str(e)}")
 
 def start_server():
     """启动Flask服务器"""
     app.run(host='0.0.0.0', port=5000)
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "endpoint": "/webhook/twitter is ready"
-    })
 
 if __name__ == "__main__":
     # 创建并启动数据处理线程
