@@ -35,6 +35,9 @@ class TelegramBot:
         if not self.token or not self.chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not found in environment variables")
         self.bot = Bot(token=self.token)
+        # 创建事件循环
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         
     async def send_message(self, text):
         """发送消息到Telegram"""
@@ -44,6 +47,7 @@ class TelegramBot:
                 text=text,
                 parse_mode='HTML'
             )
+            logging.info("Telegram消息发送成功")
         except Exception as e:
             logging.error(f"发送Telegram消息失败: {str(e)}")
 
@@ -55,8 +59,27 @@ class TelegramBot:
             f"{'='*30}\n\n"
             f"{summary}"
         )
-        # 使用asyncio运行异步发送
-        asyncio.run(self.send_message(message))
+        try:
+            # 在事件循环中运行异步发送
+            future = asyncio.run_coroutine_threadsafe(
+                self.send_message(message), 
+                self.loop
+            )
+            future.result()  # 等待发送完成
+        except Exception as e:
+            logging.error(f"发送总结到Telegram失败: {str(e)}")
+
+    def start(self):
+        """启动事件循环"""
+        def run_loop():
+            self.loop.run_forever()
+        
+        # 在新线程中运行事件循环
+        threading.Thread(target=run_loop, daemon=True).start()
+
+    def stop(self):
+        """停止事件循环"""
+        self.loop.call_soon_threadsafe(self.loop.stop)
 
 class TwitterDataProcessor:
     def __init__(self):
@@ -68,10 +91,11 @@ class TwitterDataProcessor:
     def init_csv_file(self):
         """初始化CSV文件和列"""
         columns = [
-            'timestamp',      # 事件发生时间
-            'user_name',      # 用户名
-            'event_type',     # 事件类型
-            'content'         # 内容
+            'timestamp',         # 事件发生时间
+            'user_name',        # 用户名
+            'user_description', # 用户简介
+            'event_type',       # 事件类型
+            'content'           # 内容
         ]
         
         if not os.path.exists(self.twitter_file):
@@ -83,20 +107,24 @@ class TwitterDataProcessor:
             event_type = data.get('push_type', '')
             user_data = data.get('user', {})
             
-            # 获取事件时间和内容
+            # 获取事件时间
             timestamp = datetime.fromtimestamp(
                 data.get('tweet', {}).get('publish_time') or 
                 user_data.get('updated_at', time.time())
             ).isoformat()
             
+            # 获取用户简介
+            user_description = user_data.get('description', '')
+            
+            # 获取内容
             content = (data.get('tweet', {}).get('text') or 
-                      user_data.get('description') or 
                       data.get('content', ''))
             
             # 构建行数据
             row = {
                 'timestamp': timestamp,
                 'user_name': user_data.get('name', ''),
+                'user_description': user_description,
                 'event_type': event_type,
                 'content': content
             }
@@ -129,6 +157,7 @@ class TwitterSummarizer:
         # 初始化Telegram bot
         try:
             self.telegram = TelegramBot()
+            self.telegram.start()  # 启动事件循环
         except Exception as e:
             logging.error(f"初始化Telegram Bot失败: {str(e)}")
             self.telegram = None
@@ -163,23 +192,50 @@ class TwitterSummarizer:
 
             events = df.to_dict('records')
             events_text = "\n".join([
-                f"时间: {e['timestamp']}, 用户: {e['user_name']}, "
-                f"事件: {e['event_type']}, 内容: {e['content']}"
+                f"发布者: {e['user_name']}\n"
+                f"发布者简介: {e['user_description']}\n"
+                f"事件类型: {e['event_type']}\n"
+                f"发布时间: {e['timestamp']}\n"
+                f"内容: {e['content']}\n"
+                f"{'='*30}"
                 for e in events
             ])
 
-            prompts = {
-                '5min': "请简要总结最近5分钟的Twitter活动要点。",
-                '1hour': "请总结过去1小时的主要Twitter活动和趋势。",
-                '6hour': "请分析过去6小时的Twitter活动，包括热门话题和重要互动。",
-                '24hour': "请总结过去24小时的Twitter活动，分析主要话题走向。"
-            }
+            system_prompt = """
+你是一个合格的媒体投资经理，需要分析社交媒体内容并评估投资价值。请按以下步骤分析：
+
+1. 发布者背景评估：
+- 分析发布者的背景、影响力和可信度
+- 评估其在加密市场中的专业性和声誉
+
+2. 内容分析：
+- 检查是否包含可验证的技术信息
+- 评估项目细节和技术实现的可靠性
+- 分析与当前市场趋势的相关性
+
+3. 市场热度分析：
+- 评估内容的市场反响
+- 分析与当前加密市场趋势的关联度
+
+4. 投资潜力评估：
+- 为每条内容打分（1-10分）
+- 综合考虑发布者背景、内容可靠性和市场热度
+
+5. 输出格式：
+- 筛选并展示最具投资价值的前5条内容
+- 说明每条内容的具体投资理由
+- 如果内容少于5条，则分析所有可用内容
+
+请用简洁专业的语言输出分析结果。
+"""
+
+            user_prompt = f"请分析过去{period}的以下Twitter活动：\n{events_text}"
 
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": prompts[period]},
-                    {"role": "user", "content": f"请总结以下Twitter活动：\n{events_text}"}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
                 stream=False
