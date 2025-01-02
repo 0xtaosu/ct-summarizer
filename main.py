@@ -87,10 +87,10 @@ class TwitterDataProcessor:
         self.twitter_file = os.path.join(self.data_dir, "twitter_data.csv")
         os.makedirs(self.data_dir, exist_ok=True)
         self.init_csv_file()
-    
+        
     def init_csv_file(self):
         """初始化CSV文件和列"""
-        columns = [
+        self.columns = [
             'timestamp',         # 事件发生时间
             'user_name',        # 用户名
             'user_description', # 用户简介
@@ -98,8 +98,24 @@ class TwitterDataProcessor:
             'content'           # 内容
         ]
         
-        if not os.path.exists(self.twitter_file):
-            pd.DataFrame(columns=columns).to_csv(self.twitter_file, index=False)
+        # 如果文件不存在或为空，创建新文件
+        if not os.path.exists(self.twitter_file) or os.path.getsize(self.twitter_file) == 0:
+            pd.DataFrame(columns=self.columns).to_csv(self.twitter_file, index=False)
+        else:
+            # 验证现有文件的列
+            try:
+                df = pd.read_csv(self.twitter_file)
+                if list(df.columns) != self.columns:
+                    # 备份旧文件
+                    backup_file = f"{self.twitter_file}.bak"
+                    os.rename(self.twitter_file, backup_file)
+                    logging.info(f"列不匹配，已备份旧文件到: {backup_file}")
+                    # 创建新文件
+                    pd.DataFrame(columns=self.columns).to_csv(self.twitter_file, index=False)
+            except Exception as e:
+                logging.error(f"验证CSV文件时出错: {str(e)}")
+                # 创建新文件
+                pd.DataFrame(columns=self.columns).to_csv(self.twitter_file, index=False)
     
     def process_webhook_data(self, data):
         """处理webhook数据"""
@@ -128,6 +144,14 @@ class TwitterDataProcessor:
                 'event_type': event_type,
                 'content': content
             }
+            
+            # 确保所有列都存在
+            for col in self.columns:
+                if col not in row:
+                    row[col] = ''
+            
+            # 按照指定列顺序排列数据
+            row = {col: row[col] for col in self.columns}
             
             # 保存到CSV
             pd.DataFrame([row]).to_csv(self.twitter_file, mode='a', header=False, index=False)
