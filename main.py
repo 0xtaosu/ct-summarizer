@@ -55,7 +55,7 @@ class TelegramBot:
         """发送总结到Telegram"""
         message = (
             f"<b>Twitter {period} 总结</b>\n"
-            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
             f"{'='*30}\n\n"
             f"{summary}"
         )
@@ -283,7 +283,7 @@ class TwitterSummarizer:
             summary = self.generate_summary(period)
             # 打印到控制台
             print(f"\n=== {period} 定时总结 ===")
-            print(f"总结时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"总结时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
             print(summary)
             print("="*50)
             
