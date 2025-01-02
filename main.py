@@ -53,12 +53,24 @@ class TelegramBot:
 
     def send_summary(self, period, summary):
         """发送总结到Telegram"""
+        # 转换时间段显示
+        period_display = {
+            '30min': '30分钟',
+            '6hour': '6小时',
+            '24hour': '24小时'
+        }.get(period, period)
+
+        # 添加表情符号增加可读性
         message = (
-            f"<b>Twitter {period} 总结</b>\n"
-            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-            f"{'='*30}\n\n"
-            f"{summary}"
+            f"🔔 <b>Twitter {period_display}数据分析</b>\n\n"
+            f"⏰ 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+            f"{'─'*32}\n\n"
+            f"📊 <b>数据总结</b>\n"
+            f"{summary}\n\n"
+            f"{'─'*32}\n"
+            f"🤖 由 DeepSeek AI 提供分析支持"
         )
+        
         try:
             # 在事件循环中运行异步发送
             future = asyncio.run_coroutine_threadsafe(
@@ -66,8 +78,9 @@ class TelegramBot:
                 self.loop
             )
             future.result()  # 等待发送完成
+            logging.info(f"成功发送{period_display}总结到Telegram")
         except Exception as e:
-            logging.error(f"发送总结到Telegram失败: {str(e)}")
+            logging.error(f"发送{period_display}总结到Telegram失败: {str(e)}")
 
     def start(self):
         """启动事件循环"""
@@ -173,15 +186,14 @@ class TwitterSummarizer:
             base_url="https://api.deepseek.com"
         )
         self.last_summary_time = {
-            '5min': datetime.now(),
-            '1hour': datetime.now(),
+            '30min': datetime.now(),
             '6hour': datetime.now(),
             '24hour': datetime.now()
         }
         # 初始化Telegram bot
         try:
             self.telegram = TelegramBot()
-            self.telegram.start()  # 启动事件循环
+            self.telegram.start()
         except Exception as e:
             logging.error(f"初始化Telegram Bot失败: {str(e)}")
             self.telegram = None
@@ -291,9 +303,8 @@ class TwitterSummarizer:
             if self.telegram:
                 self.telegram.send_summary(period, summary)
 
-        # 设置定时任务
-        schedule.every(5).minutes.do(lambda: generate_and_send_summary('5min'))
-        schedule.every(1).hours.do(lambda: generate_and_send_summary('1hour'))
+        # 设置定时任务 - 使用UTC时间
+        schedule.every(30).minutes.do(lambda: generate_and_send_summary('30min'))
         schedule.every(6).hours.do(lambda: generate_and_send_summary('6hour'))
         schedule.every(24).hours.do(lambda: generate_and_send_summary('24hour'))
 
