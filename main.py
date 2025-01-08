@@ -45,7 +45,7 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=text,
-                parse_mode='MarkdownV2'  # 改用 MarkdownV2
+                parse_mode=None  # 不使用特殊格式
             )
             logging.info("Telegram消息发送成功")
         except Exception as e:
@@ -54,33 +54,25 @@ class TelegramBot:
     def send_summary(self, period, summary):
         """
         发送总结到Telegram
-        使用Markdown格式化
+        使用普通文本格式
         """
-        # 转换时间段显示和对应的emoji
+        # 更新时间段显示，移除6hour
         period_info = {
             '30min': ('30分钟', '⏱️'),
-            '1hour': ('1小时', '🕐'),
-            '6hour': ('6小时', '⏰')
+            '1hour': ('1小时', '🕐')
         }.get(period, (period, '🔔'))
         
         period_display, emoji = period_info
 
-        # 转义Markdown特殊字符
-        def escape_markdown(text):
-            special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-            for char in special_chars:
-                text = text.replace(char, f'\\{char}')
-            return text
-
-        # 使用Markdown格式构建消息
+        # 构建消息
         message = (
-            f"{emoji} *Twitter {escape_markdown(period_display)}快讯*\n\n"
-            f"📅 分析时间: `{escape_markdown(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))} UTC`\n"
-            f"📊 分析范围: 最近{escape_markdown(period_display)}的数据\n"
-            f"{'_'*32}\n\n"
-            f"*数据分析*\n"
-            f"{escape_markdown(summary)}\n\n"
-            f"{'_'*32}\n"
+            f"{emoji} Twitter {period_display}快讯\n\n"
+            f"📅 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+            f"📊 分析范围: 最近{period_display}的数据\n"
+            f"{'-'*32}\n\n"
+            f"数据分析\n"
+            f"{summary}\n\n"
+            f"{'-'*32}\n"
             f"🤖 由 DeepSeek AI 提供分析支持"
         )
         
@@ -214,8 +206,7 @@ class TwitterSummarizer:
         # 初始化时间记录
         self.last_summary_time = {
             '30min': datetime.now(),
-            '1hour': datetime.now(),
-            '6hour': datetime.now()
+            '1hour': datetime.now()
         }
         
         # 初始化Telegram机器人
@@ -233,16 +224,15 @@ class TwitterSummarizer:
         """
         获取指定时间段的新数据
         Args:
-            period: 时间段标识 ('30min', '1hour', '6hour')
+            period: 时间段标识 ('30min', '1hour')
         Returns:
             DataFrame: 符合时间条件的数据
         """
         now = datetime.now()
-        # 根据时间段确定查询范围
+        # 更新时间段定义，移除6hou
         time_delta = {
             '30min': timedelta(minutes=30),
-            '1hour': timedelta(hours=1),
-            '6hour': timedelta(hours=6)
+            '1hour': timedelta(hours=1)
         }
         
         query_start = now - time_delta[period]
@@ -250,12 +240,9 @@ class TwitterSummarizer:
         try:
             df = pd.read_csv('data/twitter_data.csv')
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            # 获取时间范围内的数据
             new_data = df[df['timestamp'] > query_start]
             
-            # 更新最后总结时间
             self.last_summary_time[period] = now
-            
             return new_data
             
         except Exception as e:
@@ -373,7 +360,6 @@ class TwitterSummarizer:
         # 设置定时任务 (UTC时间)
         schedule.every(30).minutes.do(lambda: generate_and_send_summary('30min'))
         schedule.every(1).hour.do(lambda: generate_and_send_summary('1hour'))
-        schedule.every(6).hours.do(lambda: generate_and_send_summary('6hour'))
 
         # 在新线程中运行定时任务
         threading.Thread(target=run_schedule, daemon=True).start()
