@@ -200,7 +200,7 @@ class TwitterSummarizer:
             base_url="https://api.deepseek.com"
         )
         
-        # 只保留1小时的时间记录
+        # 初始化时间记录
         self.last_summary_time = {
             '1hour': datetime.now()
         }
