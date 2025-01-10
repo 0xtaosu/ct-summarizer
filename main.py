@@ -40,7 +40,7 @@ class TelegramBot:
         asyncio.set_event_loop(self.loop)
         
     async def send_message(self, text):
-        """发送消息到Telegram"""
+        """发送消息到Telegram，使用HTML格式"""
         try:
             await self.bot.send_message(
                 chat_id=self.chat_id,
@@ -54,26 +54,13 @@ class TelegramBot:
     def send_summary(self, period, summary):
         """
         发送总结到Telegram
-        使用HTML格式化
+        直接使用HTML格式
         """
-        # 转换时间段显示和对应的emoji
         period_info = {
-            '30min': ('30分钟', '⏱️'),
             '1hour': ('1小时', '🕐')
         }.get(period, (period, '🔔'))
         
         period_display, emoji = period_info
-
-        # 将Markdown格式转换为HTML格式
-        def format_html(text):
-            # 替换标题
-            text = text.replace('# ', '<b>')
-            text = text.replace('\n\n', '</b>\n\n')
-            # 替换粗体
-            text = text.replace('**', '<b>')
-            # 替换斜体
-            text = text.replace('*', '<i>')
-            return text
 
         # 构建消息
         message = (
@@ -81,8 +68,7 @@ class TelegramBot:
             f"📅 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
             f"📊 分析范围: 最近{period_display}的数据\n"
             f"{'—'*32}\n\n"
-            f"<b>数据分析</b>\n"
-            f"{format_html(summary)}\n\n"
+            f"{summary}\n\n"  # 直接使用summary，因为已经是HTML格式
             f"{'—'*32}\n"
             f"🤖 由 DeepSeek AI 提供分析支持"
         )
@@ -214,9 +200,8 @@ class TwitterSummarizer:
             base_url="https://api.deepseek.com"
         )
         
-        # 初始化时间记录
+        # 只保留1小时的时间记录
         self.last_summary_time = {
-            '30min': datetime.now(),
             '1hour': datetime.now()
         }
         
@@ -235,14 +220,13 @@ class TwitterSummarizer:
         """
         获取指定时间段的新数据
         Args:
-            period: 时间段标识 ('30min', '1hour')
+            period: 时间段标识 ('1hour')
         Returns:
             DataFrame: 符合时间条件的数据
         """
         now = datetime.now()
-        # 更新时间段定义，移除6hou
+        # 只保留1小时的时间段定义
         time_delta = {
-            '30min': timedelta(minutes=30),
             '1hour': timedelta(hours=1)
         }
         
@@ -279,43 +263,53 @@ class TwitterSummarizer:
             ])
 
             system_prompt = """
-目标：总结指定时间段内的新闻内容，提取关键事件，识别涉及的代币地址或项目，并提供上下文及相关详细信息。
+目标：总结指定时间段内的新闻内容，提取关键事件，识别涉及的代币或项目，并结合社交媒体数据提供上下文和相关详细信息。输出需采用 HTML 格式，适配 Telegram 消息展示。
 
 分析步骤：
 1. 新闻事件总结：
-- 提取所有关键新闻事件
+- 提取过去指定时间段内的所有关键新闻事件
 - 按主题分类（市场趋势/技术突破/政策动态/突发新闻）
-- 概述每个事件的核心信息
+- 简洁明了地概述每个事件的核心信息
 
-2. 代币地址或项目提取：
-- 识别并提取代币地址或项目名称
-- 验证地址或项目的可靠性
+2. 代币或项目提取：
+- 从新闻内容中识别并提取任何提到的代币名称或项目
+- 验证代币或项目的可信度，例如是否获得行业认可或具有明确链上记录
 
 3. 补充上下文信息：
-- 提供项目背景资料
-- 分析项目与事件关系
-- 整合相关新闻信息
+- 提供代币或项目的背景资料，例如技术特点、团队介绍、代币经济模型
+- 分析新闻中提及的代币或项目与事件之间的关系
+- 整合相关的社交媒体数据，例如 Twitter 链接和社区讨论内容
 
-请按以下格式输出：
+请按以下HTML格式输出：
 
-一、新闻事件总结：
+<b>😊 市场动态</b>
+- [简要概述关键市场事件]
 
-1. [新闻事件1标题]
-   - 核心内容：…
-   - 涉及项目：无/项目名称
+<b>🔥 热门代币/项目分析</b>
 
-2. [新闻事件2标题]
-   - 核心内容：…
-   - 涉及项目：无/项目名称
+<b>1. [代币/项目名称]</b>
+- <b>核心内容：</b> [简要描述代币/项目的主要新闻]
+- <b>市场反响：</b>
+  - <i>讨论聚焦：</i> [围绕该代币/项目的主要话题]
+  - <i>社区情绪：</i> [情绪分析]
+- <b>相关新闻链接：</b>
+  - <a href="链接1">[Twitter链接描述1]</a>
+  - <a href="链接2">[Twitter链接描述2]</a>
 
-二、代币地址或项目分析：
+<b>2. [代币/项目名称]</b>
+- <b>核心内容：</b> [简要描述]
+- <b>市场反响：</b>
+  - <i>讨论聚焦：</i> [主要话题]
+  - <i>社区情绪：</i> [情绪分析]
+- <b>相关新闻链接：</b>
+  - <a href="链接1">[Twitter链接描述1]</a>
+  - <a href="链接2">[Twitter链接描述2]</a>
 
-- 项目名称：…
-- 代币地址：…
-- 背景信息：…
-- 相关新闻内容：
-  1. [相关新闻1]：…
-  2. [相关新闻2]：…
+注意：
+1. 确保所有HTML标签正确闭合
+2. 保持格式统一性
+3. 链接需要是完整的URL
+4. 内容应该简洁明了，重点突出
 """
 
             user_prompt = f"请分析过去{period}的以下Twitter活动：\n{events_text}"
@@ -357,8 +351,7 @@ class TwitterSummarizer:
             if self.telegram:
                 self.telegram.send_summary(period, summary)
 
-        # 设置定时任务 (UTC时间)
-        schedule.every(30).minutes.do(lambda: generate_and_send_summary('30min'))
+        # 只保留1小时的定时任务
         schedule.every(1).hour.do(lambda: generate_and_send_summary('1hour'))
 
         # 在新线程中运行定时任务
