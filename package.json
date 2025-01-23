@@ -1,7 +1,7 @@
 {
-  "name": "ct-agent",
+  "name": "ct-summarizer",
   "version": "1.0.0",
-  "description": "CT Agent Node.js Version",
+  "description": "CT Summarizer Node.js Version",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
