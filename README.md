@@ -1,4 +1,4 @@
-# CT Agent (Node.js Version)
+# CT Summarizer
 
 一个用于处理 Twitter 数据的 Node.js 应用程序。
 
@@ -18,7 +18,7 @@
 
 1. 克隆仓库：
 ```bash
-git clone https://github.com/yourusername/ct-agent.git
+git clone https://github.com/0xtaosu/ct-summarizer.git
 cd ct-agent
 ```
 
