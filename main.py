@@ -45,11 +45,13 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=text,
-                parse_mode='HTML'  # 使用HTML格式
+                parse_mode='HTML'
             )
             logging.info("Telegram消息发送成功")
+            return True
         except Exception as e:
             logging.error(f"发送Telegram消息失败: {str(e)}")
+            return False
 
     def send_summary(self, period, summary):
         """
@@ -62,15 +64,28 @@ class TelegramBot:
         
         period_display, emoji = period_info
 
+        # 清理和格式化summary内容
+        def clean_html(text):
+            # 移除任何DOCTYPE声明
+            if '<!DOCTYPE' in text or '!doctype' in text:
+                text = text.split('>', 1)[-1]
+            
+            # 移除任何HTML和BODY标签
+            text = text.replace('<html>', '').replace('</html>', '')
+            text = text.replace('<body>', '').replace('</body>', '')
+            
+            # 确保只使用Telegram支持的HTML标签
+            return text.strip()
+
         # 构建消息
         message = (
             f"{emoji} <b>Twitter {period_display}快讯</b>\n\n"
             f"📅 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
             f"📊 分析范围: 最近{period_display}的数据\n"
             f"{'—'*32}\n\n"
-            f"{summary}\n\n"  # 直接使用summary，因为已经是HTML格式
+            f"{clean_html(summary)}\n\n"
             f"{'—'*32}\n"
-            f"🤖 由 DeepSeek AI 提供分析支持"
+            f"🤖 由 Grok AI 提供分析支持"
         )
         
         try:
@@ -78,10 +93,17 @@ class TelegramBot:
                 self.send_message(message), 
                 self.loop
             )
-            future.result()
-            logging.info(f"成功发送{period_display}总结到Telegram")
+            result = future.result()  # 等待结果
+            
+            if result:  # 只有在消息成功发送时才记录
+                logging.info(f"成功发送{period_display}总结到Telegram")
+            else:
+                logging.error(f"发送{period_display}总结到Telegram失败")
+                
         except Exception as e:
             logging.error(f"发送{period_display}总结到Telegram失败: {str(e)}")
+            logging.debug(f"消息内容: {message}")
+            logging.debug(f"原始summary: {summary}")
 
     def start(self):
         """启动事件循环"""
@@ -191,13 +213,13 @@ class TwitterSummarizer:
     """
     def __init__(self):
         # 初始化API客户端
-        api_key = os.getenv('DEEPSEEK_API_KEY')
+        api_key = os.getenv('XAI_API_KEY')
         if not api_key:
-            raise ValueError("DEEPSEEK_API_KEY not found in environment variables")
+            raise ValueError("XAI_API_KEY not found in environment variables")
             
         self.client = OpenAI(
             api_key=api_key,
-            base_url="https://api.deepseek.com"
+            base_url="https://api.x.ai/v1"  # 切换到 xAI API
         )
         
         # 初始化时间记录
@@ -245,7 +267,7 @@ class TwitterSummarizer:
             return pd.DataFrame()
 
     def generate_summary(self, period):
-        """使用 DeepSeek 生成总结"""
+        """使用 xAI 生成总结"""
         try:
             df = self.get_period_data(period)
             if len(df) == 0:
@@ -315,7 +337,7 @@ class TwitterSummarizer:
             user_prompt = f"请分析过去{period}的以下Twitter活动：\n{events_text}"
 
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model="grok-2-latest",  # 使用 Grok 模型
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
