@@ -4,19 +4,17 @@
  */
 
 require('dotenv').config();
-const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const schedule = require('node-schedule');
 const winston = require('winston');
+const { DatabaseManager, CONFIG } = require('./data');
 
 /**
  * 配置常量
  */
-const CONFIG = {
-    DATABASE_PATH: path.join('data', 'twitter_data.db'),
-    USERS_CSV_PATH: path.join('data', 'twitter_users.csv'),
+const SPIDER_CONFIG = {
     API_BASE_URL: 'https://api.koosocial.com',
     POLL_INTERVAL: '0 * * * *', // 每小时执行一次
     API_REQUEST_DELAY: 5000, // 请求间隔5秒，避免API限制
@@ -55,7 +53,7 @@ class TwitterPoller {
 
         // 创建API客户端
         this.client = axios.create({
-            baseURL: CONFIG.API_BASE_URL,
+            baseURL: SPIDER_CONFIG.API_BASE_URL,
             headers: {
                 'Content-Type': 'application/json',
                 'X-api-key': this.apiKey
@@ -63,51 +61,10 @@ class TwitterPoller {
             timeout: 30000 // 设置30秒超时
         });
 
-        // 初始化数据库
-        this.initDatabase();
+        // 初始化数据库 (写入模式)
+        this.dbManager = new DatabaseManager(false);
 
         logger.info('Twitter数据采集器已初始化');
-    }
-
-    /**
-     * 初始化SQLite数据库
-     */
-    initDatabase() {
-        // 确保data目录存在
-        if (!fs.existsSync('data')) {
-            fs.mkdirSync('data', { recursive: true });
-            logger.info('创建data目录');
-        }
-
-        // 创建数据库连接
-        this.db = new sqlite3.Database(CONFIG.DATABASE_PATH);
-        logger.info(`已连接到数据库: ${CONFIG.DATABASE_PATH}`);
-
-        // 创建tweets表
-        this.db.run(`
-            CREATE TABLE IF NOT EXISTS tweets (
-                id TEXT PRIMARY KEY,
-                user_id TEXT,
-                username TEXT,
-                screen_name TEXT,
-                text TEXT,
-                created_at TEXT,
-                retweet_count INTEGER,
-                like_count INTEGER,
-                reply_count INTEGER,
-                quote_count INTEGER,
-                bookmark_count INTEGER,
-                view_count INTEGER,
-                collected_at TEXT,
-                media_urls TEXT
-            )
-        `, (err) => {
-            if (err) {
-                logger.error(`创建tweets表失败: ${err.message}`);
-            } else {
-                logger.info('tweets表已创建或已存在');
-            }
-        });
     }
 
     /**
@@ -160,7 +117,7 @@ class TwitterPoller {
             const tweetsResponse = await this.client.get(`/api/v1/user-tweets`, {
                 params: {
                     user: userId,
-                    count: CONFIG.MAX_TWEETS_PER_REQUEST
+                    count: SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST
                 }
             });
 
@@ -254,167 +211,6 @@ class TwitterPoller {
     }
 
     /**
-     * 将推文保存到数据库
-     * @param {Array} tweets - 要保存的推文数组
-     * @returns {Promise<void>}
-     */
-    async saveTweetsToDatabase(tweets) {
-        if (!tweets || tweets.length === 0) {
-            logger.info('没有推文需要保存');
-            return;
-        }
-
-        const now = new Date().toISOString();
-        const stats = {
-            new: 0,      // 新增的推文
-            updated: 0,  // 更新的推文
-            skipped: 0,  // 跳过的推文（无变化）
-            error: 0     // 处理出错的推文
-        };
-
-        // 使用事务提高性能
-        return new Promise((resolve, reject) => {
-            this.db.serialize(() => {
-                this.db.run('BEGIN TRANSACTION');
-
-                // 准备语句
-                const checkStmt = this.db.prepare('SELECT id, retweet_count, like_count, reply_count, quote_count, bookmark_count, view_count FROM tweets WHERE id = ?');
-                const insertStmt = this.db.prepare(`
-                    INSERT INTO tweets (
-                        id, user_id, username, screen_name, text, created_at,
-                        retweet_count, like_count, reply_count, quote_count,
-                        bookmark_count, view_count, collected_at, media_urls
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `);
-                const updateStmt = this.db.prepare(`
-                    UPDATE tweets SET 
-                        retweet_count = ?, 
-                        like_count = ?, 
-                        reply_count = ?, 
-                        quote_count = ?,
-                        bookmark_count = ?, 
-                        view_count = ?, 
-                        collected_at = ?
-                    WHERE id = ?
-                `);
-
-                // 定义处理每条推文的函数
-                const processTweets = (index) => {
-                    if (index >= tweets.length) {
-                        // 所有推文处理完毕，关闭语句并提交事务
-                        checkStmt.finalize();
-                        insertStmt.finalize();
-                        updateStmt.finalize();
-
-                        this.db.run('COMMIT', (err) => {
-                            if (err) {
-                                logger.error(`提交事务失败: ${err.message}`);
-                                reject(err);
-                            } else {
-                                logger.info(`推文处理统计 - 新增: ${stats.new}, 更新: ${stats.updated}, 跳过: ${stats.skipped}, 错误: ${stats.error}`);
-                                resolve();
-                            }
-                        });
-                        return;
-                    }
-
-                    const tweet = tweets[index];
-
-                    // 检查推文是否已存在
-                    checkStmt.get(tweet.id, (err, existingTweet) => {
-                        if (err) {
-                            logger.error(`检查推文 ${tweet.id} 时出错: ${err.message}`);
-                            stats.error++;
-                            processTweets(index + 1);
-                            return;
-                        }
-
-                        try {
-                            if (existingTweet) {
-                                // 检查是否有数据变化
-                                const hasChanged =
-                                    existingTweet.retweet_count !== tweet.retweet_count ||
-                                    existingTweet.like_count !== tweet.like_count ||
-                                    existingTweet.reply_count !== tweet.reply_count ||
-                                    existingTweet.quote_count !== tweet.quote_count ||
-                                    existingTweet.bookmark_count !== tweet.bookmark_count ||
-                                    existingTweet.view_count !== tweet.view_count;
-
-                                if (hasChanged) {
-                                    // 如果有变化，只更新计数器字段
-                                    updateStmt.run(
-                                        tweet.retweet_count,
-                                        tweet.like_count,
-                                        tweet.reply_count,
-                                        tweet.quote_count,
-                                        tweet.bookmark_count,
-                                        tweet.view_count,
-                                        now,
-                                        tweet.id,
-                                        (err) => {
-                                            if (err) {
-                                                logger.error(`更新推文 ${tweet.id} 时出错: ${err.message}`);
-                                                stats.error++;
-                                            } else {
-                                                stats.updated++;
-                                                if (stats.updated <= 3) {
-                                                    logger.debug(`更新推文 ${tweet.id}：交互数据变化`);
-                                                }
-                                            }
-                                            processTweets(index + 1);
-                                        }
-                                    );
-                                } else {
-                                    // 没有变化，跳过
-                                    stats.skipped++;
-                                    processTweets(index + 1);
-                                }
-                            } else {
-                                // 新推文，执行插入
-                                insertStmt.run(
-                                    tweet.id,
-                                    tweet.user_id,
-                                    tweet.username,
-                                    tweet.screen_name,
-                                    tweet.text,
-                                    tweet.created_at,
-                                    tweet.retweet_count,
-                                    tweet.like_count,
-                                    tweet.reply_count,
-                                    tweet.quote_count,
-                                    tweet.bookmark_count,
-                                    tweet.view_count,
-                                    now,
-                                    tweet.media_urls,
-                                    (err) => {
-                                        if (err) {
-                                            logger.error(`插入推文 ${tweet.id} 时出错: ${err.message}`);
-                                            stats.error++;
-                                        } else {
-                                            stats.new++;
-                                            if (stats.new <= 3) {
-                                                logger.debug(`新增推文 ${tweet.id}：${tweet.text.substring(0, 30)}...`);
-                                            }
-                                        }
-                                        processTweets(index + 1);
-                                    }
-                                );
-                            }
-                        } catch (err) {
-                            logger.error(`处理推文 ${tweet.id} 时出错: ${err.message}`);
-                            stats.error++;
-                            processTweets(index + 1);
-                        }
-                    });
-                };
-
-                // 开始处理第一条推文
-                processTweets(0);
-            });
-        });
-    }
-
-    /**
      * 获取并保存指定用户的推文
      * @param {string} username - 用户名
      * @returns {Promise<void>}
@@ -432,7 +228,7 @@ class TwitterPoller {
             const tweets = await this.getUserTweets(user.id, user.username, user.screen_name);
 
             // 保存推文到数据库
-            await this.saveTweetsToDatabase(tweets);
+            await this.dbManager.saveTweetsToDatabase(tweets);
 
             logger.info(`成功完成用户 ${username} 的推文数据获取和保存`);
         } catch (error) {
@@ -447,7 +243,7 @@ class TwitterPoller {
     async pollAllUsers() {
         try {
             // 从CSV文件读取用户列表
-            const usernames = this.loadUsersFromCsv();
+            const usernames = this.dbManager.loadUsersFromCsv();
             if (usernames.size === 0) {
                 logger.warn('没有找到需要获取数据的用户');
                 return;
@@ -459,7 +255,7 @@ class TwitterPoller {
             for (const username of usernames) {
                 await this.pollUserTweets(username);
                 // 添加间隔以避免API限制
-                await this.sleep(CONFIG.API_REQUEST_DELAY);
+                await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY);
             }
         } catch (error) {
             logger.error(`获取所有用户数据时出错: ${error.message}`);
@@ -467,48 +263,17 @@ class TwitterPoller {
     }
 
     /**
-     * 从CSV文件加载用户列表
-     * @returns {Set<string>} 用户名集合
-     * @private
-     */
-    loadUsersFromCsv() {
-        const usernames = new Set();
-
-        try {
-            if (!fs.existsSync(CONFIG.USERS_CSV_PATH)) {
-                logger.error(`找不到文件: ${CONFIG.USERS_CSV_PATH}`);
-                return usernames;
-            }
-
-            const csvContent = fs.readFileSync(CONFIG.USERS_CSV_PATH, 'utf-8');
-            const lines = csvContent.trim().split('\n');
-
-            // 跳过标题行，获取所有唯一的用户名
-            for (let i = 1; i < lines.length; i++) {
-                const line = lines[i].split(',');
-                if (line[0]) { // 假设第一列是用户名
-                    usernames.add(line[0].trim());
-                }
-            }
-        } catch (error) {
-            logger.error(`读取用户列表文件出错: ${error.message}`);
-        }
-
-        return usernames;
-    }
-
-    /**
      * 启动定时轮询服务
      */
     startPolling() {
         // 配置定时任务
-        const job = schedule.scheduleJob(CONFIG.POLL_INTERVAL, async () => {
+        const job = schedule.scheduleJob(SPIDER_CONFIG.POLL_INTERVAL, async () => {
             logger.info('开始定时获取数据...');
             await this.pollAllUsers();
         });
 
         if (job) {
-            logger.info(`爬虫服务已启动，将按照计划 "${CONFIG.POLL_INTERVAL}" 执行`);
+            logger.info(`爬虫服务已启动，将按照计划 "${SPIDER_CONFIG.POLL_INTERVAL}" 执行`);
         } else {
             logger.error('爬虫服务启动失败，无法创建计划任务');
         }
@@ -563,8 +328,8 @@ class TwitterPoller {
      * 关闭数据库连接
      */
     close() {
-        if (this.db) {
-            this.db.close();
+        if (this.dbManager) {
+            this.dbManager.close();
             logger.info('数据库连接已关闭');
         }
     }

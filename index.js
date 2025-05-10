@@ -12,10 +12,10 @@ require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const { default: OpenAI } = require('openai');
 const schedule = require('node-schedule');
 const winston = require('winston');
+const { DatabaseManager } = require('./data');
 
 // 设置日志记录器
 const logger = winston.createLogger({
@@ -36,313 +36,6 @@ const logger = winston.createLogger({
         })
     ]
 });
-
-/**
- * Twitter 数据处理器类
- * 从SQLite数据库读取Twitter数据进行处理
- */
-class TwitterDataProcessor {
-    constructor() {
-        this.dataDir = "data";
-        this.dbPath = path.join(this.dataDir, "twitter_data.db");
-
-        // 如果数据目录不存在，则创建
-        if (!fs.existsSync(this.dataDir)) {
-            fs.mkdirSync(this.dataDir, { recursive: true });
-            logger.info('已创建数据目录');
-        }
-
-        this.initDatabase();
-    }
-
-    /**
-     * 初始化数据库连接
-     * 尝试连接到SQLite数据库并检查连接是否成功
-     */
-    initDatabase() {
-        try {
-            // 打开数据库连接（只读模式）
-            this.db = new sqlite3.Database(this.dbPath, sqlite3.OPEN_READONLY, (err) => {
-                if (err) {
-                    logger.error(`连接数据库失败: ${err.message}`);
-                    throw err;
-                }
-                logger.info(`已连接到数据库: ${this.dbPath}`);
-
-                // 连接成功后，查询表结构以验证
-                this.db.get("PRAGMA table_info(tweets)", (err, row) => {
-                    if (err) {
-                        logger.error(`检查tweets表结构失败: ${err.message}`);
-                    } else {
-                        logger.info("成功验证tweets表结构");
-                    }
-                });
-
-                // 获取总记录数
-                this.db.get("SELECT COUNT(*) as count FROM tweets", (err, row) => {
-                    if (err) {
-                        logger.error(`获取tweets总数失败: ${err.message}`);
-                    } else {
-                        logger.info(`数据库共有 ${row.count} 条推文记录`);
-                    }
-                });
-            });
-        } catch (error) {
-            logger.error(`初始化数据库连接失败: ${error.message}`);
-            this.db = null;
-        }
-    }
-
-    /**
-     * 关闭数据库连接
-     * 确保在应用关闭时正确释放资源
-     */
-    closeDatabase() {
-        if (this.db) {
-            this.db.close((err) => {
-                if (err) {
-                    logger.error(`关闭数据库连接失败: ${err.message}`);
-                } else {
-                    logger.info('数据库连接已关闭');
-                }
-            });
-        }
-    }
-
-    /**
-     * 从数据库获取指定时间段的推文数据
-     * 
-     * @param {Date} startTime 开始时间
-     * @param {Date} endTime 结束时间 (默认为当前时间)
-     * @returns {Promise<Array>} 推文数据数组
-     */
-    async getTweetsInTimeRange(startTime, endTime = new Date()) {
-        return new Promise((resolve, reject) => {
-            if (!this.db) {
-                logger.error('数据库未连接');
-                return reject(new Error('数据库未连接'));
-            }
-
-            // 将日期转换为UTC时间戳，用于比较
-            const startMs = startTime.getTime();
-            const endMs = endTime.getTime();
-
-            logger.debug(`查询时间范围: ${startTime.toISOString()} 至 ${endTime.toISOString()}`);
-            logger.debug(`时间戳范围: ${startMs} 至 ${endMs}`);
-
-            // 首先获取所有推文
-            const query = `
-                SELECT 
-                    id, 
-                    user_id, 
-                    username, 
-                    screen_name, 
-                    text, 
-                    created_at, 
-                    retweet_count, 
-                    like_count, 
-                    reply_count, 
-                    quote_count,
-                    bookmark_count, 
-                    view_count, 
-                    collected_at, 
-                    media_urls
-                FROM tweets
-                ORDER BY created_at DESC
-            `;
-
-            this.db.all(query, [], (err, rows) => {
-                if (err) {
-                    logger.error(`查询数据库失败: ${err.message}`);
-                    return reject(err);
-                }
-
-                logger.info(`从数据库获取到 ${rows.length} 条记录，开始过滤时间范围...`);
-
-                // 输出前5条记录的created_at供调试
-                if (rows.length > 0) {
-                    const sampleDates = rows.slice(0, 5).map(r => r.created_at);
-                    logger.debug(`样本日期格式: ${JSON.stringify(sampleDates)}`);
-                }
-
-                // 过滤指定时间范围内的推文
-                // Twitter的日期格式例如: "Fri May 09 20:18:10 +0000 2025"
-                const filteredRows = rows.filter(row => {
-                    try {
-                        // 直接使用JavaScript Date对象解析Twitter日期格式
-                        const tweetDate = new Date(row.created_at);
-                        const tweetMs = tweetDate.getTime();
-
-                        // 检查是否在时间范围内
-                        const isInRange = tweetMs >= startMs && tweetMs <= endMs;
-
-                        // 为了调试，记录一些日期处理信息
-                        if (rows.indexOf(row) < 5) {
-                            logger.debug(`推文日期: ${row.created_at}`);
-                            logger.debug(`解析为: ${tweetDate.toISOString()}`);
-                            logger.debug(`时间戳: ${tweetMs}, 是否在范围内: ${isInRange}`);
-                        }
-
-                        return isInRange;
-                    } catch (e) {
-                        logger.warn(`无法解析推文日期: ${row.created_at}, 错误: ${e.message}`);
-                        return false;
-                    }
-                });
-
-                logger.info(`时间范围过滤后剩余 ${filteredRows.length} 条推文记录`);
-                resolve(filteredRows);
-            });
-        });
-    }
-
-    /**
-     * 获取指定用户的最新推文
-     * @param {string} username 用户名
-     * @param {number} limit 返回记录数限制
-     * @returns {Promise<Array>} 推文数据数组
-     */
-    async getUserLatestTweets(username, limit = 10) {
-        return new Promise((resolve, reject) => {
-            if (!this.db) {
-                logger.error('数据库未连接');
-                return reject(new Error('数据库未连接'));
-            }
-
-            const query = `
-                SELECT 
-                    id, 
-                    user_id, 
-                    username, 
-                    screen_name, 
-                    text, 
-                    created_at, 
-                    retweet_count, 
-                    like_count, 
-                    reply_count, 
-                    quote_count,
-                    bookmark_count, 
-                    view_count, 
-                    collected_at, 
-                    media_urls
-                FROM tweets 
-                WHERE screen_name = ? 
-                ORDER BY created_at DESC 
-                LIMIT ?
-            `;
-
-            this.db.all(query, [username, limit], (err, rows) => {
-                if (err) {
-                    logger.error(`查询用户 ${username} 的推文失败: ${err.message}`);
-                    return reject(err);
-                }
-
-                logger.info(`获取到用户 ${username} 的 ${rows.length} 条最新推文`);
-                resolve(rows);
-            });
-        });
-    }
-
-    /**
-     * 获取热门推文
-     * @param {number} limit 返回记录数限制
-     * @param {string} metric 排序指标 (like_count, retweet_count, reply_count, quote_count, view_count)
-     * @returns {Promise<Array>} 推文数据数组
-     */
-    async getPopularTweets(limit = 10, metric = 'like_count') {
-        return new Promise((resolve, reject) => {
-            if (!this.db) {
-                logger.error('数据库未连接');
-                return reject(new Error('数据库未连接'));
-            }
-
-            // 验证排序指标
-            const validMetrics = ['like_count', 'retweet_count', 'reply_count', 'quote_count', 'view_count'];
-            if (!validMetrics.includes(metric)) {
-                logger.error(`无效的排序指标: ${metric}`);
-                return reject(new Error(`无效的排序指标: ${metric}`));
-            }
-
-            const query = `
-                SELECT 
-                    id, 
-                    user_id, 
-                    username, 
-                    screen_name, 
-                    text, 
-                    created_at, 
-                    retweet_count, 
-                    like_count, 
-                    reply_count, 
-                    quote_count,
-                    bookmark_count, 
-                    view_count, 
-                    collected_at, 
-                    media_urls
-                FROM tweets 
-                ORDER BY ${metric} DESC 
-                LIMIT ?
-            `;
-
-            this.db.all(query, [limit], (err, rows) => {
-                if (err) {
-                    logger.error(`查询热门推文失败: ${err.message}`);
-                    return reject(err);
-                }
-
-                logger.info(`获取到 ${rows.length} 条热门推文 (按 ${metric} 排序)`);
-                resolve(rows);
-            });
-        });
-    }
-
-    /**
-     * 搜索推文内容
-     * @param {string} keyword 关键词
-     * @param {number} limit 返回记录数限制
-     * @returns {Promise<Array>} 推文数据数组
-     */
-    async searchTweets(keyword, limit = 50) {
-        return new Promise((resolve, reject) => {
-            if (!this.db) {
-                logger.error('数据库未连接');
-                return reject(new Error('数据库未连接'));
-            }
-
-            const query = `
-                SELECT 
-                    id, 
-                    user_id, 
-                    username, 
-                    screen_name, 
-                    text, 
-                    created_at, 
-                    retweet_count, 
-                    like_count, 
-                    reply_count, 
-                    quote_count,
-                    bookmark_count, 
-                    view_count, 
-                    collected_at, 
-                    media_urls
-                FROM tweets 
-                WHERE text LIKE ? 
-                ORDER BY created_at DESC
-                LIMIT ?
-            `;
-
-            this.db.all(query, [`%${keyword}%`, limit], (err, rows) => {
-                if (err) {
-                    logger.error(`搜索推文失败: ${err.message}`);
-                    return reject(err);
-                }
-
-                logger.info(`搜索关键词 "${keyword}" 获取到 ${rows.length} 条推文`);
-                resolve(rows);
-            });
-        });
-    }
-}
 
 /**
  * Twitter 内容总结器类
@@ -371,11 +64,11 @@ class TwitterSummarizer {
 
         // 初始化数据处理器
         try {
-            this.dataProcessor = new TwitterDataProcessor();
+            this.db = new DatabaseManager(true); // 以只读模式打开数据库
             logger.info('TwitterSummarizer初始化成功');
         } catch (error) {
             logger.error('初始化组件失败:', error);
-            this.dataProcessor = null;
+            this.db = null;
         }
     }
 
@@ -399,15 +92,15 @@ class TwitterSummarizer {
         logger.info(`开始查询过去${period}的推文数据 (${queryStart.toISOString()} 至 ${now.toISOString()})`);
 
         try {
-            // 检查数据处理器是否存在
-            if (!this.dataProcessor) {
-                logger.error('数据处理器未初始化，无法获取数据');
+            // 检查数据库是否存在
+            if (!this.db) {
+                logger.error('数据库未初始化，无法获取数据');
                 return [];
             }
 
             // 从数据库获取时间段内的推文
             logger.info(`正在从数据库获取时间范围内的推文...`);
-            const tweets = await this.dataProcessor.getTweetsInTimeRange(queryStart, now);
+            const tweets = await this.db.getTweetsInTimeRange(queryStart, now);
 
             if (tweets.length === 0) {
                 logger.warn(`未找到指定时间范围内的推文数据 (${period})`);
@@ -527,8 +220,8 @@ class TwitterSummarizer {
      * 清理资源
      */
     cleanup() {
-        if (this.dataProcessor) {
-            this.dataProcessor.closeDatabase();
+        if (this.db) {
+            this.db.close();
         }
     }
 }
