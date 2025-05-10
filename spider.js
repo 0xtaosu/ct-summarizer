@@ -265,50 +265,153 @@ class TwitterPoller {
         }
 
         const now = new Date().toISOString();
-        const savedCount = { success: 0, error: 0 };
+        const stats = {
+            new: 0,      // 新增的推文
+            updated: 0,  // 更新的推文
+            skipped: 0,  // 跳过的推文（无变化）
+            error: 0     // 处理出错的推文
+        };
 
         // 使用事务提高性能
-        this.db.serialize(() => {
-            this.db.run('BEGIN TRANSACTION');
+        return new Promise((resolve, reject) => {
+            this.db.serialize(() => {
+                this.db.run('BEGIN TRANSACTION');
 
-            const stmt = this.db.prepare(`
-                INSERT OR REPLACE INTO tweets (
-                    id, user_id, username, screen_name, text, created_at,
-                    retweet_count, like_count, reply_count, quote_count,
-                    bookmark_count, view_count, collected_at, media_urls
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
+                // 准备语句
+                const checkStmt = this.db.prepare('SELECT id, retweet_count, like_count, reply_count, quote_count, bookmark_count, view_count FROM tweets WHERE id = ?');
+                const insertStmt = this.db.prepare(`
+                    INSERT INTO tweets (
+                        id, user_id, username, screen_name, text, created_at,
+                        retweet_count, like_count, reply_count, quote_count,
+                        bookmark_count, view_count, collected_at, media_urls
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `);
+                const updateStmt = this.db.prepare(`
+                    UPDATE tweets SET 
+                        retweet_count = ?, 
+                        like_count = ?, 
+                        reply_count = ?, 
+                        quote_count = ?,
+                        bookmark_count = ?, 
+                        view_count = ?, 
+                        collected_at = ?
+                    WHERE id = ?
+                `);
 
-            for (const tweet of tweets) {
-                try {
-                    stmt.run(
-                        tweet.id,
-                        tweet.user_id,
-                        tweet.username,
-                        tweet.screen_name,
-                        tweet.text,
-                        tweet.created_at,
-                        tweet.retweet_count,
-                        tweet.like_count,
-                        tweet.reply_count,
-                        tweet.quote_count,
-                        tweet.bookmark_count,
-                        tweet.view_count,
-                        now,
-                        tweet.media_urls
-                    );
-                    savedCount.success++;
-                } catch (err) {
-                    logger.error(`保存推文 ${tweet.id} 时出错: ${err.message}`);
-                    savedCount.error++;
-                }
-            }
+                // 定义处理每条推文的函数
+                const processTweets = (index) => {
+                    if (index >= tweets.length) {
+                        // 所有推文处理完毕，关闭语句并提交事务
+                        checkStmt.finalize();
+                        insertStmt.finalize();
+                        updateStmt.finalize();
 
-            stmt.finalize();
-            this.db.run('COMMIT');
+                        this.db.run('COMMIT', (err) => {
+                            if (err) {
+                                logger.error(`提交事务失败: ${err.message}`);
+                                reject(err);
+                            } else {
+                                logger.info(`推文处理统计 - 新增: ${stats.new}, 更新: ${stats.updated}, 跳过: ${stats.skipped}, 错误: ${stats.error}`);
+                                resolve();
+                            }
+                        });
+                        return;
+                    }
+
+                    const tweet = tweets[index];
+
+                    // 检查推文是否已存在
+                    checkStmt.get(tweet.id, (err, existingTweet) => {
+                        if (err) {
+                            logger.error(`检查推文 ${tweet.id} 时出错: ${err.message}`);
+                            stats.error++;
+                            processTweets(index + 1);
+                            return;
+                        }
+
+                        try {
+                            if (existingTweet) {
+                                // 检查是否有数据变化
+                                const hasChanged =
+                                    existingTweet.retweet_count !== tweet.retweet_count ||
+                                    existingTweet.like_count !== tweet.like_count ||
+                                    existingTweet.reply_count !== tweet.reply_count ||
+                                    existingTweet.quote_count !== tweet.quote_count ||
+                                    existingTweet.bookmark_count !== tweet.bookmark_count ||
+                                    existingTweet.view_count !== tweet.view_count;
+
+                                if (hasChanged) {
+                                    // 如果有变化，只更新计数器字段
+                                    updateStmt.run(
+                                        tweet.retweet_count,
+                                        tweet.like_count,
+                                        tweet.reply_count,
+                                        tweet.quote_count,
+                                        tweet.bookmark_count,
+                                        tweet.view_count,
+                                        now,
+                                        tweet.id,
+                                        (err) => {
+                                            if (err) {
+                                                logger.error(`更新推文 ${tweet.id} 时出错: ${err.message}`);
+                                                stats.error++;
+                                            } else {
+                                                stats.updated++;
+                                                if (stats.updated <= 3) {
+                                                    logger.debug(`更新推文 ${tweet.id}：交互数据变化`);
+                                                }
+                                            }
+                                            processTweets(index + 1);
+                                        }
+                                    );
+                                } else {
+                                    // 没有变化，跳过
+                                    stats.skipped++;
+                                    processTweets(index + 1);
+                                }
+                            } else {
+                                // 新推文，执行插入
+                                insertStmt.run(
+                                    tweet.id,
+                                    tweet.user_id,
+                                    tweet.username,
+                                    tweet.screen_name,
+                                    tweet.text,
+                                    tweet.created_at,
+                                    tweet.retweet_count,
+                                    tweet.like_count,
+                                    tweet.reply_count,
+                                    tweet.quote_count,
+                                    tweet.bookmark_count,
+                                    tweet.view_count,
+                                    now,
+                                    tweet.media_urls,
+                                    (err) => {
+                                        if (err) {
+                                            logger.error(`插入推文 ${tweet.id} 时出错: ${err.message}`);
+                                            stats.error++;
+                                        } else {
+                                            stats.new++;
+                                            if (stats.new <= 3) {
+                                                logger.debug(`新增推文 ${tweet.id}：${tweet.text.substring(0, 30)}...`);
+                                            }
+                                        }
+                                        processTweets(index + 1);
+                                    }
+                                );
+                            }
+                        } catch (err) {
+                            logger.error(`处理推文 ${tweet.id} 时出错: ${err.message}`);
+                            stats.error++;
+                            processTweets(index + 1);
+                        }
+                    });
+                };
+
+                // 开始处理第一条推文
+                processTweets(0);
+            });
         });
-
-        logger.info(`成功保存 ${savedCount.success} 条推文到数据库${savedCount.error > 0 ? `，${savedCount.error} 条失败` : ''}`);
     }
 
     /**
