@@ -16,11 +16,22 @@ const winston = require('winston');
 const CONFIG = {
     DATABASE_PATH: path.join('data', 'twitter_data.db'),
     USERS_CSV_PATH: path.join('data', 'twitter_users.csv'),
+    // 数据库性能设置 - 简化适合小型系统
+    PRAGMA_SETTINGS: {
+        'journal_mode': 'WAL',          // 使用WAL模式提高写入性能
+        'synchronous': 'NORMAL',        // 适当降低同步级别
+        'cache_size': 2000,             // 适合小型系统的缓存大小
+        'temp_store': 'MEMORY'          // 临时表存储在内存中
+    },
+    // 批量操作设置
+    BATCH_SIZE: 30,                     // 小型系统适合的批处理大小
+    MAX_STATEMENT_CACHE: 20             // 减少预处理语句缓存大小
 };
 
-// 创建日志记录器
+// 创建日志记录器 - 减少生产环境日志量
+const isProduction = process.env.NODE_ENV === 'production';
 const logger = winston.createLogger({
-    level: 'debug',
+    level: isProduction ? 'info' : 'debug',
     format: winston.format.combine(
         winston.format.timestamp(),
         winston.format.printf(({ level, message, timestamp }) => {
@@ -28,7 +39,12 @@ const logger = winston.createLogger({
         })
     ),
     transports: [
-        new winston.transports.File({ filename: 'database.log' }),
+        new winston.transports.File({
+            filename: 'database.log',
+            maxsize: 5242880, // 5MB
+            maxFiles: 5,
+            tailable: true
+        }),
         new winston.transports.Console({
             format: winston.format.combine(
                 winston.format.colorize(),
@@ -51,9 +67,14 @@ class DatabaseManager {
         this.dataDir = "data";
         this.dbPath = CONFIG.DATABASE_PATH;
         this.readOnly = readOnly;
+        this.statementCache = new Map(); // 缓存预处理语句
+        this.statementCacheLastCleanup = Date.now();
 
         // 初始化数据库
         this.init();
+
+        // 设置定期清理缓存的定时器 (每30分钟)
+        setInterval(() => this.cleanupStatementCache(), 30 * 60 * 1000);
     }
 
     /**
@@ -77,6 +98,9 @@ class DatabaseManager {
                 }
                 logger.info(`已连接到数据库: ${this.dbPath}`);
 
+                // 配置性能优化PRAGMA
+                this.configurePragmas();
+
                 // 如果不是只读模式，创建必要的表
                 if (!this.readOnly) {
                     this.createTables();
@@ -91,9 +115,27 @@ class DatabaseManager {
     }
 
     /**
+     * 配置数据库性能优化参数
+     * @private
+     */
+    configurePragmas() {
+        // 应用所有PRAGMA设置
+        for (const [pragma, value] of Object.entries(CONFIG.PRAGMA_SETTINGS)) {
+            this.db.run(`PRAGMA ${pragma} = ${value};`, (err) => {
+                if (err) {
+                    logger.error(`设置PRAGMA ${pragma}=${value}失败: ${err.message}`);
+                } else {
+                    logger.debug(`已设置PRAGMA ${pragma}=${value}`);
+                }
+            });
+        }
+    }
+
+    /**
      * 创建数据库表
      */
     createTables() {
+        // 创建推文表
         this.db.run(`
             CREATE TABLE IF NOT EXISTS tweets (
                 id TEXT PRIMARY KEY,
@@ -116,6 +158,10 @@ class DatabaseManager {
                 logger.error(`创建tweets表失败: ${err.message}`);
             } else {
                 logger.info('tweets表已创建或已存在');
+
+                // 创建索引以加速查询
+                this.createIndices();
+
                 // 获取总记录数
                 this.db.get("SELECT COUNT(*) as count FROM tweets", (err, row) => {
                     if (err) {
@@ -156,6 +202,39 @@ class DatabaseManager {
                         logger.info(`数据库共有 ${row.count} 条用户记录`);
                     }
                 });
+            }
+        });
+    }
+
+    /**
+     * 创建索引以优化查询性能
+     * @private
+     */
+    createIndices() {
+        // 用户ID索引 - 加速按用户查询推文
+        this.db.run(`CREATE INDEX IF NOT EXISTS idx_tweets_user_id ON tweets(user_id)`, (err) => {
+            if (err) {
+                logger.error(`创建user_id索引失败: ${err.message}`);
+            } else {
+                logger.debug('已创建user_id索引');
+            }
+        });
+
+        // 创建时间索引 - 加速时间范围查询
+        this.db.run(`CREATE INDEX IF NOT EXISTS idx_tweets_created_at ON tweets(created_at)`, (err) => {
+            if (err) {
+                logger.error(`创建created_at索引失败: ${err.message}`);
+            } else {
+                logger.debug('已创建created_at索引');
+            }
+        });
+
+        // 屏幕名称索引 - 优化用户名查询
+        this.db.run(`CREATE INDEX IF NOT EXISTS idx_users_screen_name ON users(screen_name)`, (err) => {
+            if (err) {
+                logger.error(`创建screen_name索引失败: ${err.message}`);
+            } else {
+                logger.debug('已创建screen_name索引');
             }
         });
     }
@@ -303,145 +382,187 @@ class DatabaseManager {
             error: 0     // 处理出错的推文
         };
 
-        // 使用事务提高性能
         return new Promise((resolve, reject) => {
-            this.db.serialize(() => {
-                this.db.run('BEGIN TRANSACTION');
+            // 首先将所有推文按批次分组处理
+            const BATCH_SIZE = CONFIG.BATCH_SIZE || 50; // 每批次处理的推文数
+            const batches = [];
 
-                // 准备语句
-                const checkStmt = this.db.prepare('SELECT id, retweet_count, like_count, reply_count, quote_count, bookmark_count, view_count FROM tweets WHERE id = ?');
-                const insertStmt = this.db.prepare(`
-                    INSERT INTO tweets (
-                        id, user_id, username, screen_name, text, created_at,
-                        retweet_count, like_count, reply_count, quote_count,
-                        bookmark_count, view_count, collected_at, media_urls
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `);
-                const updateStmt = this.db.prepare(`
-                    UPDATE tweets SET 
-                        retweet_count = ?, 
-                        like_count = ?, 
-                        reply_count = ?, 
-                        quote_count = ?,
-                        bookmark_count = ?, 
-                        view_count = ?, 
-                        collected_at = ?
-                    WHERE id = ?
-                `);
+            // 分批
+            for (let i = 0; i < tweets.length; i += BATCH_SIZE) {
+                batches.push(tweets.slice(i, i + BATCH_SIZE));
+            }
 
-                // 定义处理每条推文的函数
-                const processTweets = (index) => {
-                    if (index >= tweets.length) {
-                        // 所有推文处理完毕，关闭语句并提交事务
-                        checkStmt.finalize();
-                        insertStmt.finalize();
-                        updateStmt.finalize();
+            logger.debug(`将 ${tweets.length} 条推文分成 ${batches.length} 个批次处理`);
 
-                        this.db.run('COMMIT', (err) => {
-                            if (err) {
-                                logger.error(`提交事务失败: ${err.message}`);
-                                reject(err);
-                            } else {
-                                logger.info(`推文处理统计 - 新增: ${stats.new}, 更新: ${stats.updated}, 跳过: ${stats.skipped}, 错误: ${stats.error}`);
-                                resolve(stats);
-                            }
-                        });
-                        return;
-                    }
-
-                    const tweet = tweets[index];
-
-                    // 检查推文是否已存在
-                    checkStmt.get(tweet.id, (err, existingTweet) => {
-                        if (err) {
-                            logger.error(`检查推文 ${tweet.id} 时出错: ${err.message}`);
-                            stats.error++;
-                            processTweets(index + 1);
-                            return;
+            // 处理单个批次的函数
+            const processBatch = async (batch) => {
+                return new Promise((resolveBatch, rejectBatch) => {
+                    // 开始事务
+                    this.db.run('BEGIN IMMEDIATE TRANSACTION', async (beginErr) => {
+                        if (beginErr) {
+                            logger.error(`开始事务失败: ${beginErr.message}`);
+                            return rejectBatch(beginErr);
                         }
 
                         try {
-                            if (existingTweet) {
-                                // 检查是否有数据变化
-                                const hasChanged =
-                                    existingTweet.retweet_count !== tweet.retweet_count ||
-                                    existingTweet.like_count !== tweet.like_count ||
-                                    existingTweet.reply_count !== tweet.reply_count ||
-                                    existingTweet.quote_count !== tweet.quote_count ||
-                                    existingTweet.bookmark_count !== tweet.bookmark_count ||
-                                    existingTweet.view_count !== tweet.view_count;
+                            // 准备语句
+                            const checkStmt = this.db.prepare('SELECT id, retweet_count, like_count, reply_count, quote_count, bookmark_count, view_count FROM tweets WHERE id = ?');
+                            const insertStmt = this.db.prepare(`
+                                INSERT INTO tweets (
+                                    id, user_id, username, screen_name, text, created_at,
+                                    retweet_count, like_count, reply_count, quote_count,
+                                    bookmark_count, view_count, collected_at, media_urls
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            `);
+                            const updateStmt = this.db.prepare(`
+                                UPDATE tweets SET 
+                                    retweet_count = ?, 
+                                    like_count = ?, 
+                                    reply_count = ?, 
+                                    quote_count = ?,
+                                    bookmark_count = ?, 
+                                    view_count = ?, 
+                                    collected_at = ?
+                                WHERE id = ?
+                            `);
 
-                                if (hasChanged) {
-                                    // 如果有变化，只更新计数器字段
-                                    updateStmt.run(
-                                        tweet.retweet_count,
-                                        tweet.like_count,
-                                        tweet.reply_count,
-                                        tweet.quote_count,
-                                        tweet.bookmark_count,
-                                        tweet.view_count,
-                                        now,
-                                        tweet.id,
-                                        (err) => {
+                            // 使用Promise.all处理批次中的所有推文
+                            const processPromises = batch.map(tweet =>
+                                new Promise((resolveTweet) => {
+                                    // 包装在Promise中以避免异常中断批处理
+                                    try {
+                                        // 检查推文是否存在
+                                        checkStmt.get(tweet.id, (err, existingTweet) => {
                                             if (err) {
-                                                logger.error(`更新推文 ${tweet.id} 时出错: ${err.message}`);
+                                                logger.error(`检查推文 ${tweet.id} 时出错: ${err.message}`);
                                                 stats.error++;
-                                            } else {
-                                                stats.updated++;
-                                                if (stats.updated <= 3) {
-                                                    logger.debug(`更新推文 ${tweet.id}：交互数据变化`);
+                                                resolveTweet();
+                                                return;
+                                            }
+
+                                            if (existingTweet) {
+                                                // 检查是否有变化
+                                                const hasChanged =
+                                                    existingTweet.retweet_count !== tweet.retweet_count ||
+                                                    existingTweet.like_count !== tweet.like_count ||
+                                                    existingTweet.reply_count !== tweet.reply_count ||
+                                                    existingTweet.quote_count !== tweet.quote_count ||
+                                                    existingTweet.bookmark_count !== tweet.bookmark_count ||
+                                                    existingTweet.view_count !== tweet.view_count;
+
+                                                if (hasChanged) {
+                                                    // 更新
+                                                    updateStmt.run(
+                                                        tweet.retweet_count,
+                                                        tweet.like_count,
+                                                        tweet.reply_count,
+                                                        tweet.quote_count,
+                                                        tweet.bookmark_count,
+                                                        tweet.view_count,
+                                                        now,
+                                                        tweet.id,
+                                                        (err) => {
+                                                            if (err) {
+                                                                logger.error(`更新推文 ${tweet.id} 时出错: ${err.message}`);
+                                                                stats.error++;
+                                                            } else {
+                                                                stats.updated++;
+                                                            }
+                                                            resolveTweet();
+                                                        }
+                                                    );
+                                                } else {
+                                                    // 跳过
+                                                    stats.skipped++;
+                                                    resolveTweet();
                                                 }
+                                            } else {
+                                                // 插入
+                                                insertStmt.run(
+                                                    tweet.id,
+                                                    tweet.user_id,
+                                                    tweet.username,
+                                                    tweet.screen_name,
+                                                    tweet.text,
+                                                    tweet.created_at,
+                                                    tweet.retweet_count,
+                                                    tweet.like_count,
+                                                    tweet.reply_count,
+                                                    tweet.quote_count,
+                                                    tweet.bookmark_count,
+                                                    tweet.view_count,
+                                                    now,
+                                                    tweet.media_urls,
+                                                    (err) => {
+                                                        if (err) {
+                                                            logger.error(`插入推文 ${tweet.id} 时出错: ${err.message}`);
+                                                            stats.error++;
+                                                        } else {
+                                                            stats.new++;
+                                                        }
+                                                        resolveTweet();
+                                                    }
+                                                );
                                             }
-                                            processTweets(index + 1);
-                                        }
-                                    );
-                                } else {
-                                    // 没有变化，跳过
-                                    stats.skipped++;
-                                    processTweets(index + 1);
-                                }
-                            } else {
-                                // 新推文，执行插入
-                                insertStmt.run(
-                                    tweet.id,
-                                    tweet.user_id,
-                                    tweet.username,
-                                    tweet.screen_name,
-                                    tweet.text,
-                                    tweet.created_at,
-                                    tweet.retweet_count,
-                                    tweet.like_count,
-                                    tweet.reply_count,
-                                    tweet.quote_count,
-                                    tweet.bookmark_count,
-                                    tweet.view_count,
-                                    now,
-                                    tweet.media_urls,
-                                    (err) => {
-                                        if (err) {
-                                            logger.error(`插入推文 ${tweet.id} 时出错: ${err.message}`);
-                                            stats.error++;
-                                        } else {
-                                            stats.new++;
-                                            if (stats.new <= 3) {
-                                                logger.debug(`新增推文 ${tweet.id}：${tweet.text.substring(0, 30)}...`);
-                                            }
-                                        }
-                                        processTweets(index + 1);
+                                        });
+                                    } catch (e) {
+                                        logger.error(`处理推文时发生异常: ${e.message}`);
+                                        stats.error++;
+                                        resolveTweet();
                                     }
-                                );
-                            }
-                        } catch (err) {
-                            logger.error(`处理推文 ${tweet.id} 时出错: ${err.message}`);
-                            stats.error++;
-                            processTweets(index + 1);
+                                })
+                            );
+
+                            // 等待批次中所有推文处理完成
+                            await Promise.all(processPromises);
+
+                            // 释放语句
+                            checkStmt.finalize();
+                            insertStmt.finalize();
+                            updateStmt.finalize();
+
+                            // 提交事务
+                            this.db.run('COMMIT', (commitErr) => {
+                                if (commitErr) {
+                                    logger.error(`提交事务失败: ${commitErr.message}`);
+                                    this.db.run('ROLLBACK', () => {
+                                        rejectBatch(commitErr);
+                                    });
+                                } else {
+                                    resolveBatch();
+                                }
+                            });
+                        } catch (batchError) {
+                            logger.error(`批处理过程中出错: ${batchError.message}`);
+                            // 回滚事务
+                            this.db.run('ROLLBACK', () => {
+                                rejectBatch(batchError);
+                            });
                         }
                     });
-                };
+                });
+            };
 
-                // 开始处理第一条推文
-                processTweets(0);
-            });
+            // 依次处理各个批次
+            const processBatches = async () => {
+                try {
+                    // 串行处理每个批次以避免事务冲突
+                    for (let i = 0; i < batches.length; i++) {
+                        const batch = batches[i];
+                        logger.debug(`处理第 ${i + 1}/${batches.length} 批次，包含 ${batch.length} 条推文`);
+                        await processBatch(batch);
+                    }
+
+                    logger.info(`所有批次处理完成 - 新增: ${stats.new}, 更新: ${stats.updated}, 跳过: ${stats.skipped}, 错误: ${stats.error}`);
+                    resolve(stats);
+                } catch (error) {
+                    logger.error(`处理批次时出错: ${error.message}`);
+                    reject(error);
+                }
+            };
+
+            // 开始批处理
+            processBatches().catch(reject);
         });
     }
 
@@ -459,8 +580,15 @@ class DatabaseManager {
 
             const now = new Date().toISOString();
 
+            // 从语句缓存中获取预处理语句或创建新的
+            let checkStmt = this.statementCache.get('checkUser');
+            if (!checkStmt) {
+                checkStmt = this.db.prepare('SELECT id FROM users WHERE id = ?');
+                this.statementCache.set('checkUser', checkStmt);
+            }
+
             // 检查用户是否存在
-            this.db.get('SELECT id FROM users WHERE id = ?', [user.id], (err, row) => {
+            checkStmt.get(user.id, (err, row) => {
                 if (err) {
                     logger.error(`检查用户记录时出错: ${err.message}`);
                     return reject(err);
@@ -468,21 +596,28 @@ class DatabaseManager {
 
                 if (row) {
                     // 更新现有用户
-                    this.db.run(`
-                        UPDATE users SET
-                            username = ?,
-                            screen_name = ?,
-                            name = ?,
-                            description = ?,
-                            followers_count = ?,
-                            following_count = ?,
-                            tweet_count = ?,
-                            profile_image_url = ?,
-                            is_following = ?,
-                            is_tracked = ?,
-                            last_updated = ?
-                        WHERE id = ?
-                    `, [
+                    // 从语句缓存中获取预处理语句或创建新的
+                    let updateStmt = this.statementCache.get('updateUser');
+                    if (!updateStmt) {
+                        updateStmt = this.db.prepare(`
+                            UPDATE users SET
+                                username = ?,
+                                screen_name = ?,
+                                name = ?,
+                                description = ?,
+                                followers_count = ?,
+                                following_count = ?,
+                                tweet_count = ?,
+                                profile_image_url = ?,
+                                is_following = ?,
+                                is_tracked = ?,
+                                last_updated = ?
+                            WHERE id = ?
+                        `);
+                        this.statementCache.set('updateUser', updateStmt);
+                    }
+
+                    updateStmt.run(
                         user.username || '',
                         user.screen_name || '',
                         user.name || '',
@@ -494,24 +629,32 @@ class DatabaseManager {
                         user.is_following || 0,
                         user.is_tracked || 0,
                         now,
-                        user.id
-                    ], function (err) {
-                        if (err) {
-                            logger.error(`更新用户 ${user.id} 时出错: ${err.message}`);
-                            return reject(err);
+                        user.id,
+                        function (err) {
+                            if (err) {
+                                logger.error(`更新用户 ${user.id} 时出错: ${err.message}`);
+                                return reject(err);
+                            }
+                            logger.debug(`已更新用户: ${user.screen_name || user.id}`);
+                            resolve({ updated: true, id: user.id });
                         }
-                        logger.info(`已更新用户: ${user.screen_name || user.id}`);
-                        resolve({ updated: true, id: user.id });
-                    });
+                    );
                 } else {
                     // 添加新用户
-                    this.db.run(`
-                        INSERT INTO users (
-                            id, username, screen_name, name, description,
-                            followers_count, following_count, tweet_count,
-                            profile_image_url, is_following, is_tracked, last_updated
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    `, [
+                    // 从语句缓存中获取预处理语句或创建新的
+                    let insertStmt = this.statementCache.get('insertUser');
+                    if (!insertStmt) {
+                        insertStmt = this.db.prepare(`
+                            INSERT INTO users (
+                                id, username, screen_name, name, description,
+                                followers_count, following_count, tweet_count,
+                                profile_image_url, is_following, is_tracked, last_updated
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        `);
+                        this.statementCache.set('insertUser', insertStmt);
+                    }
+
+                    insertStmt.run(
                         user.id,
                         user.username || '',
                         user.screen_name || '',
@@ -523,15 +666,16 @@ class DatabaseManager {
                         user.profile_image_url || '',
                         user.is_following || 0,
                         user.is_tracked || 0,
-                        now
-                    ], function (err) {
-                        if (err) {
-                            logger.error(`添加用户 ${user.id} 时出错: ${err.message}`);
-                            return reject(err);
+                        now,
+                        function (err) {
+                            if (err) {
+                                logger.error(`添加用户 ${user.id} 时出错: ${err.message}`);
+                                return reject(err);
+                            }
+                            logger.debug(`已添加新用户: ${user.screen_name || user.id}`);
+                            resolve({ inserted: true, id: user.id });
                         }
-                        logger.info(`已添加新用户: ${user.screen_name || user.id}`);
-                        resolve({ inserted: true, id: user.id });
-                    });
+                    );
                 }
             });
         });
@@ -670,6 +814,36 @@ class DatabaseManager {
                 resolve(rows);
             });
         });
+    }
+
+    /**
+     * 清理预处理语句缓存
+     * 释放语句以减少内存占用
+     */
+    cleanupStatementCache() {
+        try {
+            // 如果缓存超过最大容量，执行清理
+            if (this.statementCache.size > 0) {
+                logger.debug(`清理语句缓存: 当前大小=${this.statementCache.size}`);
+
+                // 关闭所有预处理语句
+                for (const [key, stmt] of this.statementCache.entries()) {
+                    try {
+                        stmt.finalize();
+                    } catch (e) {
+                        logger.error(`清理缓存语句 '${key}' 时出错: ${e.message}`);
+                    }
+                }
+
+                // 清空缓存
+                this.statementCache.clear();
+                this.statementCacheLastCleanup = Date.now();
+
+                logger.debug('语句缓存已清理');
+            }
+        } catch (error) {
+            logger.error(`清理语句缓存时出错: ${error.message}`);
+        }
     }
 }
 

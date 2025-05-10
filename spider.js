@@ -17,8 +17,9 @@ const { DatabaseManager, CONFIG } = require('./data');
 const SPIDER_CONFIG = {
     API_BASE_URL: 'https://api.koosocial.com',
     POLL_INTERVAL: '0 * * * *', // 每小时整点执行一次
-    API_REQUEST_DELAY: 5000, // 请求间隔5秒，避免API限制
-    MAX_TWEETS_PER_REQUEST: 20,
+    API_REQUEST_DELAY: 100, // 请求间隔50毫秒，每秒最多20次请求
+    MAX_CONCURRENT_REQUESTS: 10, // 最大并发请求数
+    MAX_TWEETS_PER_REQUEST: 100, // 每次请求最多获取20条推文
     FOLLOWER_SOURCE_ACCOUNT: process.env.FOLLOWER_SOURCE_ACCOUNT, // 从env读取关注列表源账号
     MAX_FOLLOWINGS_PER_REQUEST: 70 // API最大支持70个用户每次请求
 };
@@ -151,21 +152,35 @@ class TwitterPoller {
             }
 
             const processedTweets = [];
+            let validEntries = 0;
+            let nonTweetEntries = 0;
 
             // 处理每个推文
             for (const entry of addEntriesInstruction.entries) {
                 const tweet = this.extractTweetFromEntry(entry);
                 if (tweet) {
+                    validEntries++;
                     processedTweets.push({
                         ...tweet,
                         user_id: userId,
                         username: username,
                         screen_name: screen_name
                     });
+                } else {
+                    // 统计非推文条目
+                    nonTweetEntries++;
                 }
             }
 
-            logger.info(`成功获取到 ${processedTweets.length} 条 ${username} 的推文`);
+            // 详细日志记录处理结果
+            const totalEntries = addEntriesInstruction.entries.length;
+            logger.info(`成功获取到 ${processedTweets.length} 条 ${username} 的推文 (API返回条目总数: ${totalEntries}, 有效推文: ${validEntries}, 非推文条目: ${nonTweetEntries})`);
+
+            // 如果没有获取到足够的推文，显示警告
+            if (processedTweets.length < SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST && processedTweets.length > 0) {
+                logger.warn(`获取的推文数量 (${processedTweets.length}) 少于请求的数量 (${SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST})，可能是用户推文较少或API限制`);
+            }
+
             return processedTweets;
         } catch (error) {
             this.logApiError(error, `获取用户 ${username} 推文时出错`);
@@ -400,6 +415,42 @@ class TwitterPoller {
             const MAX_SAME_CURSOR = 2; // 允许最多重复同一游标2次
             const MAX_PAGES = 20; // 最大页数限制，防止无限循环
 
+            // 预处理：创建一个批量存储用户信息的队列
+            const userQueue = [];
+            const saveUserBatch = async (users, isLastBatch = false) => {
+                if (users.length === 0 && !isLastBatch) return;
+
+                // 每批次最多处理50个用户
+                const batchSize = 50;
+                const batches = [];
+
+                // 如果是最后一批，强制执行
+                if (isLastBatch && userQueue.length > 0) {
+                    users = [...userQueue];
+                    userQueue.length = 0; // 清空队列
+                }
+
+                // 分批处理
+                for (let i = 0; i < users.length; i += batchSize) {
+                    batches.push(users.slice(i, i + batchSize));
+                }
+
+                for (const batch of batches) {
+                    const promises = batch.map(following => this.dbManager.saveUser(following));
+                    const results = await Promise.all(promises);
+
+                    // 更新统计信息
+                    for (const result of results) {
+                        if (result.inserted) {
+                            stats.newFollowings++;
+                        } else if (result.updated) {
+                            stats.updatedFollowings++;
+                        }
+                        stats.totalFollowings++;
+                    }
+                }
+            };
+
             // 循环获取所有页的关注
             while (hasMorePages && pageNumber <= MAX_PAGES) {
                 logger.info(`正在获取第 ${pageNumber} 页关注列表数据${nextCursor ? ' (游标: ' + nextCursor + ')' : ''}...`);
@@ -457,22 +508,15 @@ class TwitterPoller {
 
                 logger.info(`第 ${pageNumber} 页获取到 ${followings.length} 个关注用户`);
 
-                // 存储关注用户信息
-                for (const following of followings) {
-                    try {
-                        const result = await this.dbManager.saveUser(following);
-                        if (result.inserted) {
-                            stats.newFollowings++;
-                            logger.info(`已添加新用户: ${following.screen_name} (${following.id})`);
-                        } else if (result.updated) {
-                            stats.updatedFollowings++;
-                            logger.debug(`已更新用户: ${following.screen_name} (${following.id})`);
-                        }
-                        stats.totalFollowings++;
-                    } catch (error) {
-                        logger.error(`存储用户 ${following.screen_name} 信息出错: ${error.message}`);
-                        stats.errors++;
-                    }
+                // 将用户添加到队列
+                userQueue.push(...followings);
+
+                // 当队列达到一定大小时批量保存
+                if (userQueue.length >= 100) {
+                    logger.info(`队列中有 ${userQueue.length} 个用户，开始批量保存...`);
+                    const usersToSave = [...userQueue];
+                    userQueue.length = 0; // 清空队列
+                    await saveUserBatch(usersToSave);
                 }
 
                 // 更新游标
@@ -481,8 +525,8 @@ class TwitterPoller {
                     logger.info(`无更多分页数据（无游标或游标格式表示已到末页），已获取所有关注用户`);
                     hasMorePages = false;
                 } else {
-                    logger.info(`已获取 ${stats.totalFollowings} 个关注用户，将继续获取第 ${pageNumber + 1} 页...`);
-                    // 添加延迟以避免API限制
+                    logger.info(`已加载 ${stats.totalFollowings} 个关注用户，将继续获取第 ${pageNumber + 1} 页...`);
+                    // 添加较短延迟以避免API限制但不过度降低速度
                     pageNumber++;
                     await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY);
                 }
@@ -493,6 +537,9 @@ class TwitterPoller {
                     hasMorePages = false;
                 }
             }
+
+            // 处理队列中剩余的用户
+            await saveUserBatch([], true);
 
             stats.endTime = new Date();
             const duration = (stats.endTime.getTime() - stats.startTime.getTime()) / 1000;
@@ -508,6 +555,7 @@ class TwitterPoller {
             logger.info(`新增关注用户: ${stats.newFollowings}个`);
             logger.info(`更新关注用户: ${stats.updatedFollowings}个`);
             logger.info(`错误数量: ${stats.errors}`);
+            logger.info(`处理速度: ${stats.totalFollowings > 0 ? (stats.totalFollowings / duration).toFixed(2) : 0} 用户/秒`);
 
             // 更新统计信息
             this.stats.lastFollowerUpdate = stats.endTime;
@@ -560,10 +608,18 @@ class TwitterPoller {
                 return 0;
             }
 
-            // 保存推文到数据库
-            const saveStats = await this.dbManager.saveTweetsToDatabase(tweets);
+            // 保存推文到数据库 - 使用Promise.all优化写入
+            const savePromise = this.dbManager.saveTweetsToDatabase(tweets);
 
-            logger.info(`成功完成用户 ${screen_name} 的推文数据获取和保存: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
+            // 不必等待数据库写入完成，直接获取下一个用户的推文，数据库操作会在后台完成
+            // 记录日志，但不阻塞执行流程
+            savePromise.then(saveStats => {
+                logger.info(`成功完成用户 ${screen_name} 的推文数据获取和保存: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
+            }).catch(error => {
+                logger.error(`保存用户 ${screen_name} 的推文时出错: ${error.message}`);
+            });
+
+            // 立即返回结果，不等待数据库操作完成
             return tweets.length;
         } catch (error) {
             const userString = typeof user === 'string' ? user : (user.screen_name || user.id);
@@ -598,20 +654,50 @@ class TwitterPoller {
             const totalUsers = dbUsers.length;
             logger.info(`找到 ${totalUsers} 个用户需要获取数据`);
 
-            // 轮询每个用户的推文
-            for (const user of dbUsers) {
-                try {
-                    const tweetCount = await this.pollUserTweets(user);
-                    runStats.totalTweets += tweetCount;
-                    runStats.usersProcessed++;
-                    logger.info(`已处理 ${runStats.usersProcessed}/${totalUsers} 个用户`);
-                } catch (userError) {
-                    logger.error(`处理用户 ${user.screen_name || user.id} 时出错: ${userError.message}`);
-                    runStats.errors++;
-                }
+            // 将用户列表分成多批次并行处理
+            const processBatch = async (userBatch, batchIndex) => {
+                logger.info(`开始处理批次 ${batchIndex + 1}，包含 ${userBatch.length} 个用户`);
 
-                // 添加间隔以避免API限制
-                await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY);
+                // 批次内的用户采用并行处理
+                const batchPromises = userBatch.map(async (user, userIndex) => {
+                    // 每个请求稍微延迟，避免瞬时并发过高
+                    await this.sleep(userIndex * SPIDER_CONFIG.API_REQUEST_DELAY);
+
+                    try {
+                        const tweetCount = await this.pollUserTweets(user);
+                        runStats.totalTweets += tweetCount;
+                        runStats.usersProcessed++;
+                        logger.info(`已处理 ${runStats.usersProcessed}/${totalUsers} 个用户 (${user.screen_name || user.id})`);
+                        return { success: true, user, count: tweetCount };
+                    } catch (userError) {
+                        logger.error(`处理用户 ${user.screen_name || user.id} 时出错: ${userError.message}`);
+                        runStats.errors++;
+                        return { success: false, user, error: userError.message };
+                    }
+                });
+
+                return Promise.all(batchPromises);
+            };
+
+            // 分批处理用户列表
+            const batchSize = SPIDER_CONFIG.MAX_CONCURRENT_REQUESTS;
+            const batches = [];
+
+            // 将用户列表分成多个批次
+            for (let i = 0; i < dbUsers.length; i += batchSize) {
+                batches.push(dbUsers.slice(i, i + batchSize));
+            }
+
+            logger.info(`将 ${totalUsers} 个用户分成 ${batches.length} 个批次处理，每批次最多 ${batchSize} 个用户`);
+
+            // 依次处理每个批次（批次间串行，批次内并行）
+            for (let i = 0; i < batches.length; i++) {
+                await processBatch(batches[i], i);
+
+                // 批次间添加短暂延迟，让系统喘息
+                if (i < batches.length - 1) {
+                    await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY * 5);
+                }
             }
 
             runStats.endTime = new Date();
@@ -624,6 +710,7 @@ class TwitterPoller {
             logger.info(`处理用户: ${runStats.usersProcessed}/${totalUsers}`);
             logger.info(`获取推文: ${runStats.totalTweets}条`);
             logger.info(`错误数量: ${runStats.errors}`);
+            logger.info(`平均每秒处理: ${(runStats.usersProcessed / duration).toFixed(2)} 个用户`);
 
             // 更新全局统计信息
             this.updateStats(runStats);
@@ -789,26 +876,53 @@ class TwitterPoller {
             stats.totalUsers = dbUsers.length;
             logger.info(`从数据库中获取到 ${stats.totalUsers} 个用户，开始更新他们的关注列表`);
 
-            // 依次处理每个用户
-            for (const user of dbUsers) {
-                try {
-                    logger.info(`正在处理用户 ${user.screen_name} (ID: ${user.id})...`);
-                    const userStats = await this.fetchAndStoreAllFollowings(user.id);
+            // 定义每批次处理函数
+            const processBatch = async (userBatch, batchIndex) => {
+                logger.info(`开始处理批次 ${batchIndex + 1}，包含 ${userBatch.length} 个用户的关注列表`);
 
-                    // 更新统计信息
-                    stats.usersProcessed++;
-                    stats.totalFollowings += userStats.totalFollowings;
-                    stats.newFollowings += userStats.newFollowings;
-                    stats.updatedFollowings += userStats.updatedFollowings;
-                    stats.errors += userStats.errors;
+                // 批次内用户串行处理（关注列表获取包含分页，不适合完全并行）
+                for (const user of userBatch) {
+                    try {
+                        logger.info(`正在处理用户 ${user.screen_name} (ID: ${user.id})...`);
+                        const userStats = await this.fetchAndStoreAllFollowings(user.id);
 
-                    logger.info(`用户 ${user.screen_name} 的关注列表更新完成，共 ${userStats.totalFollowings} 个关注`);
+                        // 更新统计信息
+                        stats.usersProcessed++;
+                        stats.totalFollowings += userStats.totalFollowings;
+                        stats.newFollowings += userStats.newFollowings;
+                        stats.updatedFollowings += userStats.updatedFollowings;
+                        stats.errors += userStats.errors;
 
-                    // 添加延迟以避免API限制
-                    await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY * 2);
-                } catch (error) {
-                    logger.error(`处理用户 ${user.screen_name} 时出错: ${error.message}`);
-                    stats.errors++;
+                        logger.info(`用户 ${user.screen_name} 的关注列表更新完成，共 ${userStats.totalFollowings} 个关注，已处理 ${stats.usersProcessed}/${stats.totalUsers} 个用户`);
+                    } catch (error) {
+                        logger.error(`处理用户 ${user.screen_name} 时出错: ${error.message}`);
+                        stats.errors++;
+                        stats.usersProcessed++;
+                    }
+                }
+
+                return true;
+            };
+
+            // 分批处理用户列表 - 关注列表获取比较耗时，使用较小批次
+            const batchSize = 5; // 每批最多5个用户
+            const batches = [];
+
+            // 将用户列表分成多个批次
+            for (let i = 0; i < dbUsers.length; i += batchSize) {
+                batches.push(dbUsers.slice(i, i + batchSize));
+            }
+
+            logger.info(`将 ${stats.totalUsers} 个用户分成 ${batches.length} 个批次处理，每批次 ${batchSize} 个用户`);
+
+            // 依次处理每个批次
+            for (let i = 0; i < batches.length; i++) {
+                await processBatch(batches[i], i);
+
+                // 批次间添加短暂延迟
+                if (i < batches.length - 1) {
+                    logger.info(`批次 ${i + 1} 处理完成，短暂休息后继续下一批次...`);
+                    await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY * 10);
                 }
             }
 
@@ -825,6 +939,7 @@ class TwitterPoller {
             logger.info(`新增关注: ${stats.newFollowings}个`);
             logger.info(`更新关注: ${stats.updatedFollowings}个`);
             logger.info(`错误数量: ${stats.errors}`);
+            logger.info(`平均每秒处理: ${(stats.usersProcessed / duration).toFixed(2)} 个用户`);
 
             return stats;
         } catch (error) {
@@ -889,5 +1004,13 @@ function main() {
     }
 }
 
-// 执行主函数
-main(); 
+// 仅在直接运行此文件时执行主函数
+if (require.main === module) {
+    main();
+}
+
+// 导出类和常量，使其他模块可以导入使用
+module.exports = {
+    TwitterPoller,
+    SPIDER_CONFIG
+}; 
