@@ -16,7 +16,7 @@ const { DatabaseManager, CONFIG } = require('./data');
  */
 const SPIDER_CONFIG = {
     API_BASE_URL: 'https://api.koosocial.com',
-    POLL_INTERVAL: '0 * * * *', // 每小时执行一次
+    POLL_INTERVAL: '0 * * * *', // 每小时整点执行一次
     API_REQUEST_DELAY: 5000, // 请求间隔5秒，避免API限制
     MAX_TWEETS_PER_REQUEST: 20
 };
@@ -63,6 +63,15 @@ class TwitterPoller {
 
         // 初始化数据库 (写入模式)
         this.dbManager = new DatabaseManager(false);
+
+        // 初始化统计信息
+        this.stats = {
+            totalRuns: 0,
+            lastRunTime: null,
+            nextRunTime: null,
+            totalTweetsCollected: 0,
+            usersCounted: 0
+        };
 
         logger.info('Twitter数据采集器已初始化');
     }
@@ -213,7 +222,7 @@ class TwitterPoller {
     /**
      * 获取并保存指定用户的推文
      * @param {string} username - 用户名
-     * @returns {Promise<void>}
+     * @returns {Promise<number>} 获取到的推文数量
      */
     async pollUserTweets(username) {
         try {
@@ -221,59 +230,139 @@ class TwitterPoller {
             const user = await this.getUserByUsername(username);
             if (!user) {
                 logger.error(`无法获取用户 ${username} 的信息`);
-                return;
+                return 0;
             }
 
             // 获取用户推文
             const tweets = await this.getUserTweets(user.id, user.username, user.screen_name);
 
-            // 保存推文到数据库
-            await this.dbManager.saveTweetsToDatabase(tweets);
+            if (tweets.length === 0) {
+                logger.info(`用户 ${username} 没有获取到新推文`);
+                return 0;
+            }
 
-            logger.info(`成功完成用户 ${username} 的推文数据获取和保存`);
+            // 保存推文到数据库
+            const saveStats = await this.dbManager.saveTweetsToDatabase(tweets);
+
+            logger.info(`成功完成用户 ${username} 的推文数据获取和保存: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
+            return tweets.length;
         } catch (error) {
             logger.error(`获取用户 ${username} 的推文时出错: ${error.message}`);
+            return 0;
         }
     }
 
     /**
      * 获取所有配置的用户推文
-     * @returns {Promise<void>}
+     * @returns {Promise<Object>} 统计信息
      */
     async pollAllUsers() {
+        const runStats = {
+            startTime: new Date(),
+            endTime: null,
+            totalTweets: 0,
+            usersProcessed: 0,
+            errors: 0
+        };
+
         try {
             // 从CSV文件读取用户列表
             const usernames = this.dbManager.loadUsersFromCsv();
             if (usernames.size === 0) {
                 logger.warn('没有找到需要获取数据的用户');
-                return;
+                runStats.endTime = new Date();
+                return runStats;
             }
 
             logger.info(`找到 ${usernames.size} 个用户需要获取数据`);
 
             // 轮询每个用户的推文
             for (const username of usernames) {
-                await this.pollUserTweets(username);
+                try {
+                    const tweetCount = await this.pollUserTweets(username);
+                    runStats.totalTweets += tweetCount;
+                    runStats.usersProcessed++;
+                } catch (userError) {
+                    logger.error(`处理用户 ${username} 时出错: ${userError.message}`);
+                    runStats.errors++;
+                }
+
                 // 添加间隔以避免API限制
                 await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY);
             }
+
+            runStats.endTime = new Date();
+            const duration = (runStats.endTime.getTime() - runStats.startTime.getTime()) / 1000;
+
+            logger.info(`=== 数据采集完成 ===`);
+            logger.info(`开始时间: ${runStats.startTime.toISOString()}`);
+            logger.info(`结束时间: ${runStats.endTime.toISOString()}`);
+            logger.info(`总用时: ${duration.toFixed(2)}秒`);
+            logger.info(`处理用户: ${runStats.usersProcessed}/${usernames.size}`);
+            logger.info(`获取推文: ${runStats.totalTweets}条`);
+            logger.info(`错误数量: ${runStats.errors}`);
+
+            // 更新全局统计信息
+            this.updateStats(runStats);
+
+            return runStats;
         } catch (error) {
             logger.error(`获取所有用户数据时出错: ${error.message}`);
+            runStats.endTime = new Date();
+            runStats.errors++;
+            return runStats;
         }
+    }
+
+    /**
+     * 更新统计信息
+     * @param {Object} runStats - 单次运行的统计信息
+     * @private
+     */
+    updateStats(runStats) {
+        this.stats.totalRuns++;
+        this.stats.lastRunTime = runStats.endTime;
+        this.stats.totalTweetsCollected += runStats.totalTweets;
+        this.stats.usersCounted += runStats.usersProcessed;
+
+        // 计算下次运行时间 (下一个整点)
+        const now = new Date();
+        const nextHour = new Date(now);
+        nextHour.setHours(now.getHours() + 1);
+        nextHour.setMinutes(0);
+        nextHour.setSeconds(0);
+        nextHour.setMilliseconds(0);
+
+        this.stats.nextRunTime = nextHour;
+
+        logger.info(`下次数据采集将在 ${nextHour.toLocaleString()} 开始`);
     }
 
     /**
      * 启动定时轮询服务
      */
     startPolling() {
-        // 配置定时任务
+        // 立即执行一次数据采集
+        logger.info('服务启动，立即执行首次数据采集...');
+        this.pollAllUsers().then(() => {
+            logger.info('首次数据采集完成，已设置定时任务');
+        }).catch(error => {
+            logger.error(`首次数据采集失败: ${error.message}`);
+        });
+
+        // 配置定时任务 - 每小时整点执行
         const job = schedule.scheduleJob(SPIDER_CONFIG.POLL_INTERVAL, async () => {
-            logger.info('开始定时获取数据...');
+            const now = new Date();
+            logger.info(`=== 开始定时数据采集 (${now.toLocaleString()}) ===`);
             await this.pollAllUsers();
         });
 
         if (job) {
-            logger.info(`爬虫服务已启动，将按照计划 "${SPIDER_CONFIG.POLL_INTERVAL}" 执行`);
+            logger.info(`爬虫服务已启动，将按照计划 "${SPIDER_CONFIG.POLL_INTERVAL}" 执行 (每小时整点)`);
+
+            // 计算下次执行时间
+            const nextRun = job.nextInvocation();
+            logger.info(`下次执行时间: ${nextRun.toLocaleString()}`);
         } else {
             logger.error('爬虫服务启动失败，无法创建计划任务');
         }
@@ -281,12 +370,13 @@ class TwitterPoller {
 
     /**
      * 测试方法：立即执行一次数据获取
-     * @returns {Promise<void>}
+     * @returns {Promise<Object>} 运行统计信息
      */
     async test() {
-        logger.info('开始测试数据获取...');
-        await this.pollAllUsers();
-        logger.info('测试完成');
+        logger.info('=== 开始测试数据获取 ===');
+        const stats = await this.pollAllUsers();
+        logger.info('=== 测试运行完成 ===');
+        return stats;
     }
 
     /**
@@ -333,6 +423,17 @@ class TwitterPoller {
             logger.info('数据库连接已关闭');
         }
     }
+
+    /**
+     * 获取采集器统计信息
+     * @returns {Object} 统计信息对象
+     */
+    getStats() {
+        return {
+            ...this.stats,
+            currentTime: new Date()
+        };
+    }
 }
 
 /**
@@ -352,7 +453,8 @@ function main() {
 
         // 检查是否以测试模式运行
         if (process.argv.includes('--test')) {
-            poller.test().then(() => {
+            poller.test().then((stats) => {
+                logger.info(`测试统计: 处理用户 ${stats.usersProcessed} 个，获取推文 ${stats.totalTweets} 条，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
                 poller.close();
                 process.exit(0);
             }).catch(error => {
@@ -361,6 +463,9 @@ function main() {
                 process.exit(1);
             });
         } else {
+            logger.info(`=== Twitter 数据采集服务启动 ===`);
+            logger.info(`时间: ${new Date().toLocaleString()}`);
+            logger.info(`计划: 每小时整点自动获取数据`);
             poller.startPolling();
         }
     } catch (error) {
