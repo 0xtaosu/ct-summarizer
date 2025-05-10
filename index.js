@@ -13,7 +13,6 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { default: OpenAI } = require('openai');
-const schedule = require('node-schedule');
 const winston = require('winston');
 const { DatabaseManager } = require('./data');
 const { SYSTEM_PROMPT, AI_CONFIG } = require('./config');
@@ -65,10 +64,17 @@ class TwitterSummarizer {
 
         // 初始化数据处理器
         try {
+            // 确保数据库文件存在
+            const dbPath = path.join('data', 'twitter_data.db');
+            if (!fs.existsSync(dbPath)) {
+                logger.warn(`数据库文件 ${dbPath} 不存在，请确保爬虫已抓取数据`);
+            }
+
             this.db = new DatabaseManager(true); // 以只读模式打开数据库
             logger.info('TwitterSummarizer初始化成功');
         } catch (error) {
-            logger.error('初始化组件失败:', error);
+            logger.error('初始化数据库失败:', error);
+            logger.warn('将继续运行，但某些功能可能不可用');
             this.db = null;
         }
     }
@@ -137,26 +143,48 @@ class TwitterSummarizer {
         try {
             logger.info(`开始为${period}生成总结...`);
 
+            // 检查数据库是否可用
+            if (!this.db) {
+                const errorMsg = `数据库未初始化或不可用，无法生成${period}总结`;
+                logger.error(errorMsg);
+                return `<div class="error-message">
+                    <h3>😕 无法获取数据</h3>
+                    <p>数据库连接失败。请检查以下问题：</p>
+                    <ul>
+                        <li>确保数据库文件存在</li>
+                        <li>检查日志文件获取更多信息</li>
+                        <li>确保已运行爬虫收集数据</li>
+                    </ul>
+                </div>`;
+            }
+
             // 获取时间段内的推文数据
             const tweets = await this.getPeriodData(period);
 
             // 检查是否有数据
             if (!tweets || tweets.length === 0) {
                 logger.warn(`没有找到${period}内的推文数据，无法生成总结`);
-                return `在过去${period}内没有新的推文活动`;
+                return `<div class="no-data-message">
+                    <h3>📭 没有新数据</h3>
+                    <p>在过去${period}内没有发现新的推文活动</p>
+                </div>`;
             }
 
             logger.info(`准备为${period}内的${tweets.length}条推文生成AI总结`);
 
             // 格式化推文数据用于AI分析
-            const tweetsText = tweets.map(tweet =>
-                `用户: ${tweet.username} (@${tweet.screen_name})\n` +
-                `发布时间: ${tweet.created_at}\n` +
-                `内容: ${tweet.text}\n` +
-                `交互数据: ${tweet.like_count}点赞, ${tweet.retweet_count}转发, ${tweet.reply_count}回复` +
-                (tweet.media_urls ? `\n媒体: ${tweet.media_urls}` : '') +
-                '\n' + '='.repeat(30)
-            ).join('\n');
+            const tweetsText = tweets.map(tweet => {
+                // 构建推文源链接
+                const tweetUrl = `https://x.com/${tweet.screen_name}/status/${tweet.id}`;
+
+                return `用户: ${tweet.username} (@${tweet.screen_name})\n` +
+                    `发布时间: ${tweet.created_at}\n` +
+                    `内容: ${tweet.text}\n` +
+                    `交互数据: ${tweet.like_count}点赞, ${tweet.retweet_count}转发, ${tweet.reply_count}回复` +
+                    (tweet.media_urls ? `\n媒体: ${tweet.media_urls}` : '') +
+                    `\n源: ${tweetUrl}` +
+                    '\n' + '='.repeat(30);
+            }).join('\n');
 
             // 记录要发送到AI的数据长度
             logger.debug(`生成的推文文本长度: ${tweetsText.length} 字符`);
@@ -180,7 +208,10 @@ class TwitterSummarizer {
         } catch (error) {
             const errorMsg = `生成${period}总结时出错: ${error}`;
             logger.error(errorMsg);
-            return errorMsg;
+            return `<div class="error-message">
+                <h3>❌ 生成总结时出错</h3>
+                <p>${error.message}</p>
+            </div>`;
         }
     }
 
@@ -203,141 +234,11 @@ function setupWebServer(summarizer) {
     app.use(express.json());
     app.use(express.static('public')); // 为静态文件提供服务
 
-    // 创建公共目录和HTML文件
+    // 确保公共目录存在
     if (!fs.existsSync('public')) {
         fs.mkdirSync('public', { recursive: true });
         logger.info('已创建public目录');
     }
-
-    // 创建HTML页面
-    const htmlContent = `
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Twitter 总结器</title>
-    <style>
-        body {
-            font-family: 'Arial', sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f8fa;
-            color: #14171a;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: #fff;
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-            padding: 25px;
-        }
-        header {
-            text-align: center;
-            margin-bottom: 30px;
-            border-bottom: 1px solid #e1e8ed;
-            padding-bottom: 20px;
-        }
-        h1 {
-            color: #1da1f2;
-            margin: 0;
-        }
-        .btn {
-            background-color: #1da1f2;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 20px;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: bold;
-            transition: background-color 0.2s;
-            margin: 10px 0;
-            width: 100%;
-        }
-        .btn:hover {
-            background-color: #1991db;
-        }
-        .btn:disabled {
-            background-color: #9ad2f6;
-            cursor: not-allowed;
-        }
-        #summary {
-            margin-top: 20px;
-            padding: 15px;
-            border: 1px solid #e1e8ed;
-            border-radius: 8px;
-            background-color: #f5f8fa;
-            min-height: 100px;
-        }
-        .loading {
-            text-align: center;
-            color: #657786;
-            font-style: italic;
-        }
-        .timestamp {
-            color: #657786;
-            font-size: 14px;
-            text-align: right;
-            margin-top: 10px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Twitter 总结器</h1>
-            <p>获取最新Twitter动态的AI摘要</p>
-        </header>
-        
-        <div>
-            <button id="hourBtn" class="btn">获取最近1小时总结</button>
-            <div id="summary">
-                <p>点击上方按钮获取最新总结...</p>
-            </div>
-            <div class="timestamp" id="timestamp"></div>
-        </div>
-    </div>
-
-    <script>
-        document.getElementById('hourBtn').addEventListener('click', async function() {
-            const button = this;
-            const summaryDiv = document.getElementById('summary');
-            const timestampDiv = document.getElementById('timestamp');
-            
-            // 禁用按钮并显示加载状态
-            button.disabled = true;
-            summaryDiv.innerHTML = '<p class="loading">AI正在生成总结，请稍候...</p>';
-            
-            try {
-                // 调用API获取1小时总结
-                const response = await fetch('/api/summary/1hour');
-                
-                if (!response.ok) {
-                    throw new Error('获取总结失败');
-                }
-                
-                const data = await response.json();
-                
-                // 更新界面
-                summaryDiv.innerHTML = data.summary;
-                timestampDiv.textContent = '更新时间: ' + new Date().toLocaleString();
-            } catch (error) {
-                summaryDiv.innerHTML = '<p style="color: red;">获取总结失败: ' + error.message + '</p>';
-            } finally {
-                // 重新启用按钮
-                button.disabled = false;
-            }
-        });
-    </script>
-</body>
-</html>
-`;
-
-    fs.writeFileSync('public/index.html', htmlContent);
-    logger.info('创建/更新了web界面文件');
 
     // API接口 - 获取指定时间段的总结
     app.get('/api/summary/:period', async (req, res) => {

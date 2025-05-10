@@ -89,6 +89,14 @@ class DatabaseManager {
                 logger.info('已创建数据目录');
             }
 
+            // 检查数据库文件是否存在
+            const dbFileExists = fs.existsSync(this.dbPath);
+
+            // 如果在只读模式下数据库文件不存在，则报错
+            if (this.readOnly && !dbFileExists) {
+                throw new Error(`数据库文件 ${this.dbPath} 不存在，无法以只读模式打开`);
+            }
+
             // 打开数据库连接
             const openMode = this.readOnly ? sqlite3.OPEN_READONLY : sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE;
             this.db = new sqlite3.Database(this.dbPath, openMode, (err) => {
@@ -96,7 +104,7 @@ class DatabaseManager {
                     logger.error(`连接数据库失败: ${err.message}`);
                     throw err;
                 }
-                logger.info(`已连接到数据库: ${this.dbPath}`);
+                logger.info(`已连接到数据库: ${this.dbPath} ${this.readOnly ? '(只读模式)' : ''}`);
 
                 // 配置性能优化PRAGMA
                 this.configurePragmas();
@@ -121,6 +129,12 @@ class DatabaseManager {
     configurePragmas() {
         // 应用所有PRAGMA设置
         for (const [pragma, value] of Object.entries(CONFIG.PRAGMA_SETTINGS)) {
+            // 跳过只读模式下的WAL模式设置，因为它需要写入权限
+            if (this.readOnly && pragma === 'journal_mode') {
+                logger.info(`跳过在只读模式下设置 PRAGMA ${pragma}=${value}`);
+                continue;
+            }
+
             this.db.run(`PRAGMA ${pragma} = ${value};`, (err) => {
                 if (err) {
                     logger.error(`设置PRAGMA ${pragma}=${value}失败: ${err.message}`);

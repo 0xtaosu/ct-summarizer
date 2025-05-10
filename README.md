@@ -50,7 +50,6 @@
    ```
    KOOSOCIAL_API_KEY=your_api_key_here
    DEEPSEEK_API_KEY=your_api_key_here
-   FOLLOWER_SOURCE_ACCOUNT=your_source_account_here
    ```
 
 ## 使用方法
