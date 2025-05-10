@@ -1,7 +1,7 @@
 /**
  * 配置常量
  */
-const FOLLOWER_SOURCE_ACCOUNT = "0xColinSun";
+const FOLLOWER_SOURCE_ACCOUNT = "0xColinSu";
 
 /**
  * AI配置文件
@@ -72,12 +72,12 @@ const SYSTEM_PROMPT = `
 
 // AI配置
 const AI_CONFIG = {
-    model: "deepseek-chat",
-    temperature: 0.7
+  model: "deepseek-chat",
+  temperature: 0.7
 };
 
 module.exports = {
-    FOLLOWER_SOURCE_ACCOUNT,
-    SYSTEM_PROMPT,
-    AI_CONFIG
+  FOLLOWER_SOURCE_ACCOUNT,
+  SYSTEM_PROMPT,
+  AI_CONFIG
 }; 

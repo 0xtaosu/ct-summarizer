@@ -377,8 +377,7 @@ class TwitterPoller {
             following_count: user.legacy.friends_count,
             tweet_count: user.legacy.statuses_count,
             profile_image_url: user.legacy.profile_image_url_https,
-            is_following: false, // 这不是关注者，而是被关注的用户
-            is_tracked: true // 默认跟踪从关注列表添加的用户
+            is_following: false // 这不是关注者，而是被关注的用户
         };
     }
 
@@ -844,111 +843,6 @@ class TwitterPoller {
             currentTime: new Date()
         };
     }
-
-    /**
-     * 从数据库获取并更新所有用户的关注列表
-     * @returns {Promise<Object>} 统计信息
-     */
-    async fetchAndUpdateAllUsersFollowings() {
-        const stats = {
-            startTime: new Date(),
-            endTime: null,
-            totalUsers: 0,
-            usersProcessed: 0,
-            totalFollowings: 0,
-            newFollowings: 0,
-            updatedFollowings: 0,
-            errors: 0
-        };
-
-        try {
-            logger.info(`开始从数据库获取所有用户信息...`);
-
-            // 从数据库获取所有用户
-            const dbUsers = await this.dbManager.getAllUsers();
-
-            if (!dbUsers || dbUsers.length === 0) {
-                logger.warn(`数据库中没有找到用户数据`);
-                stats.endTime = new Date();
-                return stats;
-            }
-
-            stats.totalUsers = dbUsers.length;
-            logger.info(`从数据库中获取到 ${stats.totalUsers} 个用户，开始更新他们的关注列表`);
-
-            // 定义每批次处理函数
-            const processBatch = async (userBatch, batchIndex) => {
-                logger.info(`开始处理批次 ${batchIndex + 1}，包含 ${userBatch.length} 个用户的关注列表`);
-
-                // 批次内用户串行处理（关注列表获取包含分页，不适合完全并行）
-                for (const user of userBatch) {
-                    try {
-                        logger.info(`正在处理用户 ${user.screen_name} (ID: ${user.id})...`);
-                        const userStats = await this.fetchAndStoreAllFollowings(user.id);
-
-                        // 更新统计信息
-                        stats.usersProcessed++;
-                        stats.totalFollowings += userStats.totalFollowings;
-                        stats.newFollowings += userStats.newFollowings;
-                        stats.updatedFollowings += userStats.updatedFollowings;
-                        stats.errors += userStats.errors;
-
-                        logger.info(`用户 ${user.screen_name} 的关注列表更新完成，共 ${userStats.totalFollowings} 个关注，已处理 ${stats.usersProcessed}/${stats.totalUsers} 个用户`);
-                    } catch (error) {
-                        logger.error(`处理用户 ${user.screen_name} 时出错: ${error.message}`);
-                        stats.errors++;
-                        stats.usersProcessed++;
-                    }
-                }
-
-                return true;
-            };
-
-            // 分批处理用户列表 - 关注列表获取比较耗时，使用较小批次
-            const batchSize = 5; // 每批最多5个用户
-            const batches = [];
-
-            // 将用户列表分成多个批次
-            for (let i = 0; i < dbUsers.length; i += batchSize) {
-                batches.push(dbUsers.slice(i, i + batchSize));
-            }
-
-            logger.info(`将 ${stats.totalUsers} 个用户分成 ${batches.length} 个批次处理，每批次 ${batchSize} 个用户`);
-
-            // 依次处理每个批次
-            for (let i = 0; i < batches.length; i++) {
-                await processBatch(batches[i], i);
-
-                // 批次间添加短暂延迟
-                if (i < batches.length - 1) {
-                    logger.info(`批次 ${i + 1} 处理完成，短暂休息后继续下一批次...`);
-                    await this.sleep(SPIDER_CONFIG.API_REQUEST_DELAY * 10);
-                }
-            }
-
-            stats.endTime = new Date();
-            const duration = (stats.endTime.getTime() - stats.startTime.getTime()) / 1000;
-
-            logger.info(`=== 所有用户关注列表更新完成 ===`);
-            logger.info(`开始时间: ${stats.startTime.toISOString()}`);
-            logger.info(`结束时间: ${stats.endTime.toISOString()}`);
-            logger.info(`总用时: ${duration.toFixed(2)}秒`);
-            logger.info(`总用户数: ${stats.totalUsers}个`);
-            logger.info(`处理成功: ${stats.usersProcessed}个`);
-            logger.info(`获取关注: ${stats.totalFollowings}个`);
-            logger.info(`新增关注: ${stats.newFollowings}个`);
-            logger.info(`更新关注: ${stats.updatedFollowings}个`);
-            logger.info(`错误数量: ${stats.errors}`);
-            logger.info(`平均每秒处理: ${(stats.usersProcessed / duration).toFixed(2)} 个用户`);
-
-            return stats;
-        } catch (error) {
-            logger.error(`获取所有用户关注列表时出错: ${error.message}`);
-            stats.endTime = new Date();
-            stats.errors++;
-            return stats;
-        }
-    }
 }
 
 /**
@@ -979,17 +873,34 @@ function main() {
                 process.exit(1);
             });
         } else if (process.argv.includes('--fetch-followings')) {
-            // 从数据库读取所有用户并更新他们的关注列表
-            logger.info(`开始更新数据库中所有用户的关注列表`);
-            poller.fetchAndUpdateAllUsersFollowings().then((stats) => {
-                logger.info(`所有用户关注列表更新完成: 共处理 ${stats.usersProcessed}/${stats.totalUsers} 个用户，获取 ${stats.totalFollowings} 个关注，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
-                poller.close();
-                process.exit(0);
-            }).catch(error => {
-                logger.error(`更新所有用户关注列表失败: ${error.message}`);
-                poller.close();
-                process.exit(1);
-            });
+            // 检查是否指定用户
+            const userIndex = process.argv.indexOf('--user');
+            if (userIndex !== -1 && process.argv.length > userIndex + 1) {
+                const username = process.argv[userIndex + 1];
+                logger.info(`获取指定用户 ${username} 的关注列表`);
+                poller.fetchAndStoreAllFollowings(username).then((stats) => {
+                    logger.info(`用户 ${username} 关注列表获取完成: 共获取 ${stats.totalFollowings} 个关注，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
+                    poller.close();
+                    process.exit(0);
+                }).catch(error => {
+                    logger.error(`获取用户关注列表失败: ${error.message}`);
+                    poller.close();
+                    process.exit(1);
+                });
+            } else {
+                // 如果没有指定用户，则使用配置中的默认账号
+                const username = SPIDER_CONFIG.FOLLOWER_SOURCE_ACCOUNT;
+                logger.info(`获取默认源账号 ${username} 的关注列表`);
+                poller.fetchAndStoreAllFollowings(username).then((stats) => {
+                    logger.info(`默认源账号 ${username} 关注列表获取完成: 共获取 ${stats.totalFollowings} 个关注，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
+                    poller.close();
+                    process.exit(0);
+                }).catch(error => {
+                    logger.error(`获取源账号关注列表失败: ${error.message}`);
+                    poller.close();
+                    process.exit(1);
+                });
+            }
         } else {
             logger.info(`=== Twitter 数据采集服务启动 ===`);
             logger.info(`时间: ${new Date().toLocaleString()}`);
