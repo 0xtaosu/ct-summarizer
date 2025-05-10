@@ -10,7 +10,7 @@ const axios = require('axios');
 const schedule = require('node-schedule');
 const winston = require('winston');
 const { DatabaseManager, CONFIG } = require('./data');
-
+const { FOLLOWER_SOURCE_ACCOUNT } = require('./config');
 /**
  * 配置常量
  */
@@ -20,7 +20,7 @@ const SPIDER_CONFIG = {
     API_REQUEST_DELAY: 100, // 请求间隔50毫秒，每秒最多20次请求
     MAX_CONCURRENT_REQUESTS: 10, // 最大并发请求数
     MAX_TWEETS_PER_REQUEST: 100, // 每次请求最多获取20条推文
-    FOLLOWER_SOURCE_ACCOUNT: process.env.FOLLOWER_SOURCE_ACCOUNT, // 从env读取关注列表源账号
+    FOLLOWER_SOURCE_ACCOUNT: FOLLOWER_SOURCE_ACCOUNT, // 从config.js读取关注列表源账号
     MAX_FOLLOWINGS_PER_REQUEST: 70 // API最大支持70个用户每次请求
 };
 

@@ -16,6 +16,7 @@ const { default: OpenAI } = require('openai');
 const schedule = require('node-schedule');
 const winston = require('winston');
 const { DatabaseManager } = require('./data');
+const { SYSTEM_PROMPT, AI_CONFIG } = require('./config');
 
 // 设置日志记录器
 const logger = winston.createLogger({
@@ -160,50 +161,17 @@ class TwitterSummarizer {
             // 记录要发送到AI的数据长度
             logger.debug(`生成的推文文本长度: ${tweetsText.length} 字符`);
 
-            // AI提示词系统信息
-            const systemPrompt = `
-目标：总结指定时间段内的Twitter推文内容，提取关键事件，识别涉及的代币或项目，并提供上下文和相关详细信息。输出需采用 HTML 格式，适配网页和消息展示。
-
-分析步骤：
-1. 推文事件总结：
-- 提取过去指定时间段内的所有关键推文主题
-- 按主题分类（市场趋势/技术突破/政策动态/突发新闻）
-- 简洁明了地概述每个主题的核心信息
-
-2. 代币或项目提取：
-- 从推文内容中识别并提取任何提到的代币名称或项目
-- 验证代币或项目的可信度，例如是否获得行业认可或具有明确链上记录
-
-3. 补充上下文信息：
-- 提供代币或项目的背景资料，例如技术特点、团队介绍、代币经济模型
-- 分析推文中提及的代币或项目与事件之间的关系
-- 整合相关热门推文的交互数据，分析社区讨论情况
-
-请按以下HTML格式输出：
-
-<b>😊 市场动态</b>
-- [简要概述关键市场事件]
-
-<b>🔥 热门代币/项目分析</b>
-
-<b>1. [代币/项目名称]</b>
-- <b>核心内容：</b> [简要描述代币/项目的主要新闻]
-- <b>市场反响：</b>
-  - <i>讨论聚焦：</i> [围绕该代币/项目的主要话题]
-  - <i>社区情绪：</i> [情绪分析]
-`;
-
             // 用户提示词
-            const userPrompt = `请分析过去${period}的以下Twitter推文：\n${tweetsText}`;
+            const userPrompt = `请分析过去${period}的以下Twitter推文并生成结构化市场总结：\n${tweetsText}`;
 
             logger.info('正在调用AI生成总结...');
             const response = await this.client.chat.completions.create({
-                model: "deepseek-chat",
+                model: AI_CONFIG.model,
                 messages: [
-                    { role: "system", content: systemPrompt },
+                    { role: "system", content: SYSTEM_PROMPT },
                     { role: "user", content: userPrompt }
                 ],
-                temperature: 0.7
+                temperature: AI_CONFIG.temperature
             });
 
             logger.info('AI总结生成完成');
