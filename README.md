@@ -2,166 +2,167 @@
 
 一个用于收集、处理和分析 Twitter 数据的 Node.js 应用程序。
 
-## 系统架构
+## 系统组件
 
-该应用程序由三个主要组件组成：
+本系统包含以下主要组件：
 
-1. **数据收集器 (spider.js)** - 从Twitter API获取数据并存储到数据库
-2. **数据处理器 (index.js)** - 处理数据并生成AI摘要
-3. **数据库管理 (data.js)** - 处理所有与数据库相关的操作
+1. **数据采集服务 (spider.js)**
+   - 自动定时从数据库中的用户获取最新推文
+   - 支持手动获取特定账号的关注者列表(支持分页获取大量关注)
+   - 数据自动存储到SQLite数据库
+   - 支持定时采集推文，默认每小时执行一次
 
-## 功能特点
+2. **数据处理与Web界面 (index.js)**
+   - 处理存储的推文数据
+   - 使用DeepSeek API生成AI摘要
+   - 提供Web界面展示推文和摘要
 
-- 自动收集指定Twitter账户的推文数据
-- 使用DeepSeek AI模型生成内容总结
-- 数据存储到SQLite数据库
-- 提供Web界面查看最新总结
-- 定期轮询更新数据（每小时自动执行）
-- 防止数据重复并更新互动统计信息
-- 便捷的管理脚本自动化运维
+3. **数据库管理模块 (data.js)**
+   - 处理所有数据库操作
+   - 管理推文和用户数据
 
-## 环境要求
+## 安装与配置
 
-- Node.js >= 14.x
-- npm >= 6.x
-- bash 或兼容的 shell 环境（用于运行管理脚本）
+### 环境要求
 
-## 安装
+- Node.js v14.0.0 或更高版本
+- npm 或 yarn
 
-1. 克隆仓库：
-```bash
-git clone https://github.com/0xtaosu/ct-summarizer.git
-cd ct-summarizer
-```
+### 安装步骤
+
+1. 克隆项目仓库：
+   ```
+   git clone <仓库地址>
+   cd twitter-data-collector
+   ```
 
 2. 安装依赖：
-```bash
-npm install
-```
+   ```
+   npm install
+   ```
 
-3. 创建用户列表文件:
-在 `data` 目录下创建 `twitter_users.csv` 文件，格式如下：
-```
-username
-elonmusk
-vitalikbuterin
-...
-```
+3. 创建配置文件：
+   ```
+   cp .env.example .env
+   ```
 
-4. 配置环境变量：
-创建 `.env` 文件并添加以下配置：
+4. 修改配置文件 `.env`，填入必要的API密钥：
+   ```
+   KOOSOCIAL_API_KEY=your_api_key_here
+   DEEPSEEK_API_KEY=your_api_key_here
+   FOLLOWER_SOURCE_ACCOUNT=your_source_account_here
+   ```
+
+## 使用方法
+
+### 启动系统
+
+使用提供的脚本一键启动所有服务：
+
 ```
-KOOSOCIAL_API_KEY=your_koosocial_api_key
-DEEPSEEK_API_KEY=your_deepseek_api_key
-PORT=5001
-```
-
-5. 设置脚本权限：
-```bash
-chmod +x start.sh stop.sh status.sh
-```
-
-## 运行
-
-### 使用管理脚本（推荐）
-
-启动所有服务：
-```bash
 ./start.sh
 ```
 
-查看服务状态：
-```bash
-./status.sh
-```
+### 停止系统
 
-停止所有服务：
-```bash
+```
 ./stop.sh
 ```
 
-### 手动运行（单独组件）
+### 查看状态
 
-启动数据收集器：
-```bash
-node spider.js
+```
+./status.sh
 ```
 
-启动Web服务和摘要生成器：
-```bash
-node index.js
-```
+### 命令行选项
 
-测试数据收集（一次性运行）:
-```bash
-node spider.js --test
-```
+#### 数据采集服务 (spider.js)
 
-## 访问Web界面
+- 测试模式（获取所有用户的推文但不设置定时任务）：
+  ```
+  node spider.js --test
+  ```
 
-Web服务启动后，访问 http://localhost:5001 可以查看最新的Twitter总结。
+- 手动获取关注列表（用于更新要跟踪的用户列表）：
+  ```
+  node spider.js --fetch-followings
+  ```
 
-## 系统组件详解
+- 手动获取指定账号的关注列表（使用用户名）：
+  ```
+  node spider.js --fetch-followings --user <Twitter用户名>
+  ```
 
-### data.js
-中央数据管理模块，提供数据库的创建、读取、更新等功能。
-- 封装所有数据库操作
-- 提供读写模式和只读模式
-- 支持查询特定时间范围内的推文
-- 优化数据存储，避免重复数据
+- 手动获取指定账号的关注列表（使用数字ID）：
+  ```
+  node spider.js --fetch-followings --userid <Twitter用户ID>
+  ```
 
-### spider.js
-通过KooSocial API抓取Twitter数据并保存到数据库。
-- 定时执行，每小时自动获取新数据
-- 支持批量处理多个Twitter账户
-- 自动更新互动统计（点赞、转发、评论等）
-- 详细的日志记录和错误处理
+  > 注意：Twitter API每次请求最多返回70个关注账号，系统会自动处理分页以获取所有关注账号。
+  > 分页处理逻辑：系统解析API响应顶层的cursor对象，当bottom值格式为"0|数字"（即"|"前为0）时，表示已到达最后一页。
 
-### index.js
-提供Web界面，使用DeepSeek AI对最近的Twitter数据进行分析和总结。
-- RESTful API接口获取不同时间段的数据总结
-- 响应式Web界面展示总结结果
-- 使用DeepSeek AI生成有洞察力的内容分析
+#### Web服务 (index.js)
 
-### 管理脚本
-提供完善的系统管理功能。
-
-#### start.sh
-- 同时启动数据收集器和Web服务
-- 创建日志目录结构
-- 保存进程ID用于后续管理
-- 验证服务启动状态
-
-#### stop.sh
-- 优雅地停止所有服务
-- 处理未响应的进程
-- 清理PID文件
-
-#### status.sh
-- 显示所有服务的运行状态
-- 监控资源使用情况
-- 显示最近的日志记录
-- 检查数据库文件状态
+- 指定端口：
+  ```
+  node index.js --port 3000
+  ```
 
 ## 数据存储
 
-所有收集的Twitter数据存储在SQLite数据库中 (`data/twitter_data.db`)。
-服务日志存储在 `logs` 目录下：
-- `logs/spider.log` - 数据收集器日志
-- `logs/index.log` - Web服务和AI总结日志
-- `logs/database.log` - 数据库操作日志
+系统使用SQLite作为数据库，存储在`data/twitter_data.db`文件中。数据库包含以下主要表：
 
-## 常见问题
+1. **tweets**: 存储采集的推文数据
+2. **users**: 存储用户资料信息，包括要跟踪的所有Twitter用户
 
-**Q: 如何添加新的Twitter账户进行跟踪？**  
-A: 编辑 `data/twitter_users.csv` 文件，每行添加一个Twitter用户名，然后重启服务。
+## 用户跟踪与数据收集流程
 
-**Q: 如何修改数据采集频率？**  
-A: 在 `spider.js` 中修改 `SPIDER_CONFIG.POLL_INTERVAL` 配置项，默认为每小时执行一次。
+系统采用以下工作流程处理Twitter数据：
 
-**Q: Web界面无法访问怎么办？**  
-A: 运行 `./status.sh` 检查服务状态，确认Web服务是否正常运行，并检查端口是否被占用。
+1. **用户管理（手动操作）**
+   - 通过 `--fetch-followings` 命令手动更新要跟踪的用户列表
+   - 系统从数据库中获取用户信息，而不再使用CSV文件
 
-## 许可证
+2. **推文收集（自动定时操作）**
+   - 系统启动时立即从数据库中所有用户获取最新推文
+   - 每小时自动执行一次推文获取任务
+   - 所有推文数据自动保存到数据库中
 
-MIT
+## Twitter API游标说明
+
+Twitter分页API使用特殊的游标格式来控制数据分页。游标通常是形如 "X|Y" 的字符串，其中：
+- 当X为0时（例如 "0|123456789"），表示这是最后一页数据，没有更多后续页面
+- 当X不为0时，表示还有更多数据可以获取
+- Y部分是内部使用的标识符
+
+本系统自动处理这种游标格式，确保能够正确获取所有页面的数据。
+
+## 项目架构
+
+```
+.
+├── data/                  # 数据存储目录
+│   └── twitter_data.db    # SQLite数据库
+├── public/                # 静态资源文件
+├── spider.js              # 数据采集服务
+├── index.js               # Web服务和数据处理
+├── data.js                # 数据库管理模块
+├── start.sh               # 启动脚本
+├── stop.sh                # 停止脚本
+├── status.sh              # 状态查看脚本
+└── README.md              # 说明文档
+```
+
+## 日志
+
+系统各组件生成的日志保存在以下文件中：
+
+- `spider.log`: 数据采集服务日志
+- `database.log`: 数据库操作日志
+- `app.log`: Web服务日志
+- `webhook.log`: Webhook事件日志
+
+## 许可协议
+
+Copyright © 2024

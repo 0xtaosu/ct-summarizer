@@ -126,6 +126,38 @@ class DatabaseManager {
                 });
             }
         });
+
+        // 创建users表，用于存储用户资料
+        this.db.run(`
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT,
+                screen_name TEXT,
+                name TEXT,
+                description TEXT,
+                followers_count INTEGER,
+                following_count INTEGER,
+                tweet_count INTEGER,
+                profile_image_url TEXT,
+                is_following BOOLEAN DEFAULT 0,
+                is_tracked BOOLEAN DEFAULT 0,
+                last_updated TEXT
+            )
+        `, (err) => {
+            if (err) {
+                logger.error(`创建users表失败: ${err.message}`);
+            } else {
+                logger.info('users表已创建或已存在');
+                // 获取总记录数
+                this.db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
+                    if (err) {
+                        logger.error(`获取users总数失败: ${err.message}`);
+                    } else {
+                        logger.info(`数据库共有 ${row.count} 条用户记录`);
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -251,8 +283,6 @@ class DatabaseManager {
             });
         });
     }
-
-
 
     /**
      * 将推文保存到数据库
@@ -416,6 +446,126 @@ class DatabaseManager {
     }
 
     /**
+     * 添加或更新用户信息
+     * @param {Object} user - 用户信息对象
+     * @returns {Promise<Object>} 操作结果
+     */
+    async saveUser(user) {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            const now = new Date().toISOString();
+
+            // 检查用户是否存在
+            this.db.get('SELECT id FROM users WHERE id = ?', [user.id], (err, row) => {
+                if (err) {
+                    logger.error(`检查用户记录时出错: ${err.message}`);
+                    return reject(err);
+                }
+
+                if (row) {
+                    // 更新现有用户
+                    this.db.run(`
+                        UPDATE users SET
+                            username = ?,
+                            screen_name = ?,
+                            name = ?,
+                            description = ?,
+                            followers_count = ?,
+                            following_count = ?,
+                            tweet_count = ?,
+                            profile_image_url = ?,
+                            is_following = ?,
+                            is_tracked = ?,
+                            last_updated = ?
+                        WHERE id = ?
+                    `, [
+                        user.username || '',
+                        user.screen_name || '',
+                        user.name || '',
+                        user.description || '',
+                        user.followers_count || 0,
+                        user.following_count || 0,
+                        user.tweet_count || 0,
+                        user.profile_image_url || '',
+                        user.is_following || 0,
+                        user.is_tracked || 0,
+                        now,
+                        user.id
+                    ], function (err) {
+                        if (err) {
+                            logger.error(`更新用户 ${user.id} 时出错: ${err.message}`);
+                            return reject(err);
+                        }
+                        logger.info(`已更新用户: ${user.screen_name || user.id}`);
+                        resolve({ updated: true, id: user.id });
+                    });
+                } else {
+                    // 添加新用户
+                    this.db.run(`
+                        INSERT INTO users (
+                            id, username, screen_name, name, description,
+                            followers_count, following_count, tweet_count,
+                            profile_image_url, is_following, is_tracked, last_updated
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `, [
+                        user.id,
+                        user.username || '',
+                        user.screen_name || '',
+                        user.name || '',
+                        user.description || '',
+                        user.followers_count || 0,
+                        user.following_count || 0,
+                        user.tweet_count || 0,
+                        user.profile_image_url || '',
+                        user.is_following || 0,
+                        user.is_tracked || 0,
+                        now
+                    ], function (err) {
+                        if (err) {
+                            logger.error(`添加用户 ${user.id} 时出错: ${err.message}`);
+                            return reject(err);
+                        }
+                        logger.info(`已添加新用户: ${user.screen_name || user.id}`);
+                        resolve({ inserted: true, id: user.id });
+                    });
+                }
+            });
+        });
+    }
+
+    /**
+     * 获取要跟踪的用户列表
+     * @returns {Promise<Array>} 用户对象数组
+     */
+    async getTrackedUsers() {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            this.db.all(`
+                SELECT id, username, screen_name
+                FROM users
+                WHERE is_tracked = 1
+                ORDER BY screen_name
+            `, [], (err, rows) => {
+                if (err) {
+                    logger.error(`获取跟踪用户列表失败: ${err.message}`);
+                    return reject(err);
+                }
+
+                logger.info(`从数据库获取到 ${rows.length} 个跟踪用户`);
+                resolve(rows);
+            });
+        });
+    }
+
+    /**
      * 从CSV文件加载用户列表
      * @returns {Set<string>} 用户名集合
      */
@@ -423,26 +573,103 @@ class DatabaseManager {
         const usernames = new Set();
 
         try {
-            if (!fs.existsSync(CONFIG.USERS_CSV_PATH)) {
-                logger.error(`找不到文件: ${CONFIG.USERS_CSV_PATH}`);
-                return usernames;
-            }
+            // 首先尝试从数据库获取要跟踪的用户
+            this.getTrackedUsers()
+                .then(users => {
+                    if (users && users.length > 0) {
+                        users.forEach(user => {
+                            if (user.screen_name) {
+                                usernames.add(user.screen_name);
+                            }
+                        });
+                        logger.info(`从数据库加载了 ${usernames.size} 个跟踪用户`);
+                        return;
+                    }
 
-            const csvContent = fs.readFileSync(CONFIG.USERS_CSV_PATH, 'utf-8');
-            const lines = csvContent.trim().split('\n');
+                    // 如果数据库中没有用户，则回退到CSV文件
+                    if (!fs.existsSync(CONFIG.USERS_CSV_PATH)) {
+                        logger.warn(`找不到文件: ${CONFIG.USERS_CSV_PATH}，数据库中也没有跟踪用户`);
+                        return;
+                    }
 
-            // 跳过标题行，获取所有唯一的用户名
-            for (let i = 1; i < lines.length; i++) {
-                const line = lines[i].split(',');
-                if (line[0]) { // 假设第一列是用户名
-                    usernames.add(line[0].trim());
-                }
-            }
+                    const csvContent = fs.readFileSync(CONFIG.USERS_CSV_PATH, 'utf-8');
+                    const lines = csvContent.trim().split('\n');
+
+                    // 跳过标题行，获取所有唯一的用户名
+                    for (let i = 1; i < lines.length; i++) {
+                        const line = lines[i].split(',');
+                        if (line[0]) { // 假设第一列是用户名
+                            usernames.add(line[0].trim());
+                        }
+                    }
+                    logger.info(`从CSV文件加载了 ${usernames.size} 个用户`);
+                })
+                .catch(err => {
+                    logger.error(`从数据库加载用户失败，尝试使用CSV: ${err.message}`);
+
+                    // 回退到CSV文件
+                    if (!fs.existsSync(CONFIG.USERS_CSV_PATH)) {
+                        logger.error(`找不到文件: ${CONFIG.USERS_CSV_PATH}`);
+                        return;
+                    }
+
+                    const csvContent = fs.readFileSync(CONFIG.USERS_CSV_PATH, 'utf-8');
+                    const lines = csvContent.trim().split('\n');
+
+                    // 跳过标题行，获取所有唯一的用户名
+                    for (let i = 1; i < lines.length; i++) {
+                        const line = lines[i].split(',');
+                        if (line[0]) { // 假设第一列是用户名
+                            usernames.add(line[0].trim());
+                        }
+                    }
+                });
         } catch (error) {
-            logger.error(`读取用户列表文件出错: ${error.message}`);
+            logger.error(`读取用户列表出错: ${error.message}`);
         }
 
         return usernames;
+    }
+
+    /**
+     * 获取数据库中的所有用户
+     * @returns {Promise<Array>} 用户对象数组
+     */
+    async getAllUsers() {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            const query = `
+                SELECT 
+                    id, 
+                    username, 
+                    screen_name, 
+                    name, 
+                    description, 
+                    followers_count, 
+                    following_count, 
+                    tweet_count, 
+                    profile_image_url, 
+                    is_following, 
+                    is_tracked, 
+                    last_updated
+                FROM users
+                ORDER BY screen_name ASC
+            `;
+
+            this.db.all(query, [], (err, rows) => {
+                if (err) {
+                    logger.error(`获取所有用户失败: ${err.message}`);
+                    return reject(err);
+                }
+
+                logger.info(`从数据库获取到 ${rows.length} 条用户记录`);
+                resolve(rows);
+            });
+        });
     }
 }
 
