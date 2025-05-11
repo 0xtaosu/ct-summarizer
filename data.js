@@ -435,62 +435,100 @@ class DatabaseManager {
             // 处理单个批次的函数
             const processBatch = async (batch) => {
                 return new Promise((resolveBatch, rejectBatch) => {
-                    // 开始事务
-                    this.db.run('BEGIN IMMEDIATE TRANSACTION', async (beginErr) => {
-                        if (beginErr) {
-                            logger.error(`开始事务失败: ${beginErr.message}`);
-                            return rejectBatch(beginErr);
-                        }
+                    let checkStmt, insertStmt, updateStmt;
 
-                        try {
-                            // 准备语句
-                            const checkStmt = this.db.prepare('SELECT id, retweet_count, like_count, reply_count, quote_count, bookmark_count, view_count FROM tweets WHERE id = ?');
-                            const insertStmt = this.db.prepare(`
-                                INSERT INTO tweets (
-                                    id, user_id, username, screen_name, text, created_at,
-                                    retweet_count, like_count, reply_count, quote_count,
-                                    bookmark_count, view_count, collected_at, media_urls
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            `);
-                            const updateStmt = this.db.prepare(`
-                                UPDATE tweets SET 
-                                    retweet_count = ?, 
-                                    like_count = ?, 
-                                    reply_count = ?, 
-                                    quote_count = ?,
-                                    bookmark_count = ?, 
-                                    view_count = ?, 
-                                    collected_at = ?
-                                WHERE id = ?
-                            `);
+                    try {
+                        // 准备语句
+                        checkStmt = this.db.prepare('SELECT id, retweet_count, like_count, reply_count, quote_count, bookmark_count, view_count FROM tweets WHERE id = ?');
+                        insertStmt = this.db.prepare(`
+                            INSERT INTO tweets (
+                                id, user_id, username, screen_name, text, created_at,
+                                retweet_count, like_count, reply_count, quote_count,
+                                bookmark_count, view_count, collected_at, media_urls
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        `);
+                        updateStmt = this.db.prepare(`
+                            UPDATE tweets SET 
+                                retweet_count = ?, 
+                                like_count = ?, 
+                                reply_count = ?, 
+                                quote_count = ?,
+                                bookmark_count = ?, 
+                                view_count = ?, 
+                                collected_at = ?
+                            WHERE id = ?
+                        `);
 
-                            // 使用Promise.all处理批次中的所有推文
-                            const processPromises = batch.map(tweet =>
-                                new Promise((resolveTweet) => {
-                                    // 包装在Promise中以避免异常中断批处理
-                                    try {
-                                        // 检查推文是否存在
-                                        checkStmt.get(tweet.id, (err, existingTweet) => {
-                                            if (err) {
-                                                logger.error(`检查推文 ${tweet.id} 时出错: ${err.message}`);
-                                                stats.error++;
-                                                resolveTweet();
-                                                return;
-                                            }
+                        // 开始事务
+                        this.db.run('BEGIN TRANSACTION', async (beginErr) => {
+                            if (beginErr) {
+                                logger.error(`开始事务失败: ${beginErr.message}`);
+                                safeFinalize(checkStmt);
+                                safeFinalize(insertStmt);
+                                safeFinalize(updateStmt);
+                                return rejectBatch(beginErr);
+                            }
 
-                                            if (existingTweet) {
-                                                // 检查是否有变化
-                                                const hasChanged =
-                                                    existingTweet.retweet_count !== tweet.retweet_count ||
-                                                    existingTweet.like_count !== tweet.like_count ||
-                                                    existingTweet.reply_count !== tweet.reply_count ||
-                                                    existingTweet.quote_count !== tweet.quote_count ||
-                                                    existingTweet.bookmark_count !== tweet.bookmark_count ||
-                                                    existingTweet.view_count !== tweet.view_count;
+                            try {
+                                // 使用Promise.all处理批次中的所有推文
+                                const processPromises = batch.map(tweet =>
+                                    new Promise((resolveTweet) => {
+                                        // 包装在Promise中以避免异常中断批处理
+                                        try {
+                                            // 检查推文是否存在
+                                            checkStmt.get(tweet.id, (err, existingTweet) => {
+                                                if (err) {
+                                                    logger.error(`检查推文 ${tweet.id} 时出错: ${err.message}`);
+                                                    stats.error++;
+                                                    resolveTweet();
+                                                    return;
+                                                }
 
-                                                if (hasChanged) {
-                                                    // 更新
-                                                    updateStmt.run(
+                                                if (existingTweet) {
+                                                    // 检查是否有变化
+                                                    const hasChanged =
+                                                        existingTweet.retweet_count !== tweet.retweet_count ||
+                                                        existingTweet.like_count !== tweet.like_count ||
+                                                        existingTweet.reply_count !== tweet.reply_count ||
+                                                        existingTweet.quote_count !== tweet.quote_count ||
+                                                        existingTweet.bookmark_count !== tweet.bookmark_count ||
+                                                        existingTweet.view_count !== tweet.view_count;
+
+                                                    if (hasChanged) {
+                                                        // 更新
+                                                        updateStmt.run(
+                                                            tweet.retweet_count,
+                                                            tweet.like_count,
+                                                            tweet.reply_count,
+                                                            tweet.quote_count,
+                                                            tweet.bookmark_count,
+                                                            tweet.view_count,
+                                                            now,
+                                                            tweet.id,
+                                                            (err) => {
+                                                                if (err) {
+                                                                    logger.error(`更新推文 ${tweet.id} 时出错: ${err.message}`);
+                                                                    stats.error++;
+                                                                } else {
+                                                                    stats.updated++;
+                                                                }
+                                                                resolveTweet();
+                                                            }
+                                                        );
+                                                    } else {
+                                                        // 跳过
+                                                        stats.skipped++;
+                                                        resolveTweet();
+                                                    }
+                                                } else {
+                                                    // 插入
+                                                    insertStmt.run(
+                                                        tweet.id,
+                                                        tweet.user_id,
+                                                        tweet.username,
+                                                        tweet.screen_name,
+                                                        tweet.text,
+                                                        tweet.created_at,
                                                         tweet.retweet_count,
                                                         tweet.like_count,
                                                         tweet.reply_count,
@@ -498,96 +536,87 @@ class DatabaseManager {
                                                         tweet.bookmark_count,
                                                         tweet.view_count,
                                                         now,
-                                                        tweet.id,
+                                                        tweet.media_urls,
                                                         (err) => {
                                                             if (err) {
-                                                                logger.error(`更新推文 ${tweet.id} 时出错: ${err.message}`);
+                                                                logger.error(`插入推文 ${tweet.id} 时出错: ${err.message}`);
                                                                 stats.error++;
                                                             } else {
-                                                                stats.updated++;
+                                                                stats.new++;
                                                             }
                                                             resolveTweet();
                                                         }
                                                     );
-                                                } else {
-                                                    // 跳过
-                                                    stats.skipped++;
-                                                    resolveTweet();
                                                 }
-                                            } else {
-                                                // 插入
-                                                insertStmt.run(
-                                                    tweet.id,
-                                                    tweet.user_id,
-                                                    tweet.username,
-                                                    tweet.screen_name,
-                                                    tweet.text,
-                                                    tweet.created_at,
-                                                    tweet.retweet_count,
-                                                    tweet.like_count,
-                                                    tweet.reply_count,
-                                                    tweet.quote_count,
-                                                    tweet.bookmark_count,
-                                                    tweet.view_count,
-                                                    now,
-                                                    tweet.media_urls,
-                                                    (err) => {
-                                                        if (err) {
-                                                            logger.error(`插入推文 ${tweet.id} 时出错: ${err.message}`);
-                                                            stats.error++;
-                                                        } else {
-                                                            stats.new++;
-                                                        }
-                                                        resolveTweet();
-                                                    }
-                                                );
-                                            }
+                                            });
+                                        } catch (e) {
+                                            logger.error(`处理推文时发生异常: ${e.message}`);
+                                            stats.error++;
+                                            resolveTweet();
+                                        }
+                                    })
+                                );
+
+                                // 等待批次中所有推文处理完成
+                                await Promise.all(processPromises);
+
+                                // 提交事务
+                                this.db.run('COMMIT', (commitErr) => {
+                                    if (commitErr) {
+                                        logger.error(`提交事务失败: ${commitErr.message}`);
+                                        this.db.run('ROLLBACK', () => {
+                                            safeFinalize(checkStmt);
+                                            safeFinalize(insertStmt);
+                                            safeFinalize(updateStmt);
+                                            rejectBatch(commitErr);
                                         });
-                                    } catch (e) {
-                                        logger.error(`处理推文时发生异常: ${e.message}`);
-                                        stats.error++;
-                                        resolveTweet();
+                                    } else {
+                                        safeFinalize(checkStmt);
+                                        safeFinalize(insertStmt);
+                                        safeFinalize(updateStmt);
+                                        resolveBatch();
                                     }
-                                })
-                            );
-
-                            // 等待批次中所有推文处理完成
-                            await Promise.all(processPromises);
-
-                            // 释放语句
-                            checkStmt.finalize();
-                            insertStmt.finalize();
-                            updateStmt.finalize();
-
-                            // 提交事务
-                            this.db.run('COMMIT', (commitErr) => {
-                                if (commitErr) {
-                                    logger.error(`提交事务失败: ${commitErr.message}`);
-                                    this.db.run('ROLLBACK', () => {
-                                        rejectBatch(commitErr);
-                                    });
-                                } else {
-                                    resolveBatch();
-                                }
-                            });
-                        } catch (batchError) {
-                            logger.error(`批处理过程中出错: ${batchError.message}`);
-                            // 回滚事务
-                            this.db.run('ROLLBACK', () => {
-                                rejectBatch(batchError);
-                            });
-                        }
-                    });
+                                });
+                            } catch (batchError) {
+                                logger.error(`批处理过程中出错: ${batchError.message}`);
+                                // 回滚事务
+                                this.db.run('ROLLBACK', () => {
+                                    safeFinalize(checkStmt);
+                                    safeFinalize(insertStmt);
+                                    safeFinalize(updateStmt);
+                                    rejectBatch(batchError);
+                                });
+                            }
+                        });
+                    } catch (error) {
+                        logger.error(`批处理初始化出错: ${error.message}`);
+                        safeFinalize(checkStmt);
+                        safeFinalize(insertStmt);
+                        safeFinalize(updateStmt);
+                        rejectBatch(error);
+                    }
                 });
             };
 
-            // 依次处理各个批次
+            // 安全释放语句
+            function safeFinalize(stmt) {
+                if (stmt) {
+                    try {
+                        stmt.finalize();
+                    } catch (e) {
+                        logger.error(`释放语句时出错: ${e.message}`);
+                    }
+                }
+            }
+
+            // 依次处理各个批次 - 使用串行处理方式避免事务冲突
             const processBatches = async () => {
                 try {
                     // 串行处理每个批次以避免事务冲突
                     for (let i = 0; i < batches.length; i++) {
                         const batch = batches[i];
                         logger.debug(`处理第 ${i + 1}/${batches.length} 批次，包含 ${batch.length} 条推文`);
+                        // 重要: 等待每个批次完成后再处理下一个，避免事务冲突
                         await processBatch(batch);
                     }
 
@@ -599,7 +628,7 @@ class DatabaseManager {
                 }
             };
 
-            // 开始批处理
+            // 开始处理批次
             processBatches().catch(reject);
         });
     }

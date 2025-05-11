@@ -109,20 +109,29 @@ class TwitterSummarizer {
     }
 
     scheduleJobs() {
-        // 每30分钟生成一次1小时总结 (0分和30分)
-        schedule.scheduleJob('0,30 * * * *', async () => {
+        // 在启动时生成一次所有时间段的总结
+        logger.info('生成启动时的初始总结...');
+        this.generateAndSaveSummary('1hour').catch(err =>
+            logger.error(`生成启动时的1小时总结失败: ${err.message}`));
+        this.generateAndSaveSummary('12hours').catch(err =>
+            logger.error(`生成启动时的12小时总结失败: ${err.message}`));
+        this.generateAndSaveSummary('1day').catch(err =>
+            logger.error(`生成启动时的1天总结失败: ${err.message}`));
+
+        // 每小时在x:10分时生成1小时总结（例如1:10, 2:10, 3:10...）
+        schedule.scheduleJob('10 * * * *', async () => {
             logger.info('执行定时任务: 生成1小时总结');
             await this.generateAndSaveSummary('1hour');
         });
 
-        // 每6小时生成一次12小时总结 (0点,6点,12点,18点)
-        schedule.scheduleJob('0 0,6,12,18 * * *', async () => {
+        // 每12小时在x:10分时生成12小时总结 (每天0:10和12:10)
+        schedule.scheduleJob('10 0,12 * * *', async () => {
             logger.info('执行定时任务: 生成12小时总结');
             await this.generateAndSaveSummary('12hours');
         });
 
-        // 每12小时生成一次24小时总结 (0点和12点)
-        schedule.scheduleJob('0 0,12 * * *', async () => {
+        // 每24小时在0:10生成1天总结 (每天0:10)
+        schedule.scheduleJob('10 0 * * *', async () => {
             logger.info('执行定时任务: 生成1天总结');
             await this.generateAndSaveSummary('1day');
         });
