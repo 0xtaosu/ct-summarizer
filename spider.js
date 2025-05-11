@@ -8,7 +8,8 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const schedule = require('node-schedule');
-const winston = require('winston');
+// 使用新的集中式日志记录系统
+const { createLogger } = require('./logger');
 const { DatabaseManager, CONFIG } = require('./data');
 const { FOLLOWER_SOURCE_ACCOUNT } = require('./config');
 /**
@@ -27,17 +28,7 @@ const SPIDER_CONFIG = {
 /**
  * 配置日志记录器
  */
-const logger = winston.createLogger({
-    level: 'info',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.json()
-    ),
-    transports: [
-        new winston.transports.File({ filename: 'spider.log' }),
-        new winston.transports.Console()
-    ]
-});
+const logger = createLogger('spider');
 
 /**
  * Twitter数据采集器类
@@ -846,81 +837,54 @@ class TwitterPoller {
 }
 
 /**
- * 主函数：初始化并启动服务
+ * 主函数
  */
 function main() {
     try {
-        // 启动服务
+        logger.info('启动Twitter数据采集器...');
+
+        // 创建采集器实例
         const poller = new TwitterPoller();
 
-        // 处理程序退出
-        process.on('SIGINT', () => {
-            logger.info('接收到中断信号，正在关闭...');
-            poller.close();
-            process.exit(0);
-        });
-
-        // 检查命令行参数
-        if (process.argv.includes('--test')) {
-            // 测试模式运行
-            poller.test().then((stats) => {
-                logger.info(`测试统计: 处理用户 ${stats.usersProcessed} 个，获取推文 ${stats.totalTweets} 条，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
+        // 根据环境变量决定启动模式
+        if (process.env.TEST_MODE === 'true') {
+            logger.info('以测试模式运行...');
+            poller.test();
+        } else if (process.env.MANUAL_RUN === 'true') {
+            logger.info('手动运行采集任务...');
+            poller.pollAllUsers().then(() => {
+                logger.info('采集任务完成，退出程序');
                 poller.close();
                 process.exit(0);
             }).catch(error => {
-                logger.error(`测试失败: ${error.message}`);
+                logger.error('采集任务失败:', error);
                 poller.close();
                 process.exit(1);
             });
-        } else if (process.argv.includes('--fetch-followings')) {
-            // 检查是否指定用户
-            const userIndex = process.argv.indexOf('--user');
-            if (userIndex !== -1 && process.argv.length > userIndex + 1) {
-                const username = process.argv[userIndex + 1];
-                logger.info(`获取指定用户 ${username} 的关注列表`);
-                poller.fetchAndStoreAllFollowings(username).then((stats) => {
-                    logger.info(`用户 ${username} 关注列表获取完成: 共获取 ${stats.totalFollowings} 个关注，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
-                    poller.close();
-                    process.exit(0);
-                }).catch(error => {
-                    logger.error(`获取用户关注列表失败: ${error.message}`);
-                    poller.close();
-                    process.exit(1);
-                });
-            } else {
-                // 如果没有指定用户，则使用配置中的默认账号
-                const username = SPIDER_CONFIG.FOLLOWER_SOURCE_ACCOUNT;
-                logger.info(`获取默认源账号 ${username} 的关注列表`);
-                poller.fetchAndStoreAllFollowings(username).then((stats) => {
-                    logger.info(`默认源账号 ${username} 关注列表获取完成: 共获取 ${stats.totalFollowings} 个关注，用时 ${((stats.endTime - stats.startTime) / 1000).toFixed(2)} 秒`);
-                    poller.close();
-                    process.exit(0);
-                }).catch(error => {
-                    logger.error(`获取源账号关注列表失败: ${error.message}`);
-                    poller.close();
-                    process.exit(1);
-                });
-            }
         } else {
-            logger.info(`=== Twitter 数据采集服务启动 ===`);
-            logger.info(`时间: ${new Date().toLocaleString()}`);
-            logger.info(`计划: 每小时整点自动获取推文数据`);
-            logger.info(`数据来源: 从数据库users表获取用户，然后抓取这些用户的最新推文`);
-            logger.info(`注意: 用户关注列表更新不会自动执行，需要手动运行 --fetch-followings 命令`);
+            // 正常模式：启动定时任务
+            logger.info('以定时任务模式运行...');
             poller.startPolling();
+
+            // 注册进程退出处理
+            process.on('SIGINT', () => {
+                logger.info('接收到中断信号，正在关闭...');
+                poller.close();
+                process.exit(0);
+            });
         }
     } catch (error) {
-        logger.error(`启动服务时出错: ${error.message}`);
+        logger.error('启动Twitter数据采集器失败:', error);
         process.exit(1);
     }
 }
 
-// 仅在直接运行此文件时执行主函数
+// 如果直接运行此文件，则执行主函数
 if (require.main === module) {
     main();
 }
 
-// 导出类和常量，使其他模块可以导入使用
+// 导出模块
 module.exports = {
     TwitterPoller,
     SPIDER_CONFIG

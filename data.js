@@ -10,7 +10,8 @@
 const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
-const winston = require('winston');
+// 使用新的集中式日志记录系统
+const { createLogger } = require('./logger');
 
 // 配置常量
 const CONFIG = {
@@ -28,31 +29,8 @@ const CONFIG = {
     MAX_STATEMENT_CACHE: 20             // 减少预处理语句缓存大小
 };
 
-// 创建日志记录器 - 减少生产环境日志量
-const isProduction = process.env.NODE_ENV === 'production';
-const logger = winston.createLogger({
-    level: isProduction ? 'info' : 'debug',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.printf(({ level, message, timestamp }) => {
-            return `${timestamp} [${level.toUpperCase()}]: ${message}`;
-        })
-    ),
-    transports: [
-        new winston.transports.File({
-            filename: 'database.log',
-            maxsize: 5242880, // 5MB
-            maxFiles: 5,
-            tailable: true
-        }),
-        new winston.transports.Console({
-            format: winston.format.combine(
-                winston.format.colorize(),
-                winston.format.simple()
-            )
-        })
-    ]
-});
+// 创建日志记录器
+const logger = createLogger('database');
 
 /**
  * 数据库管理类
@@ -218,6 +196,34 @@ class DatabaseManager {
                 });
             }
         });
+
+        // 创建summaries表，用于存储AI生成的总结
+        this.db.run(`
+            CREATE TABLE IF NOT EXISTS summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period TEXT NOT NULL,
+                content TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                tweet_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT DEFAULT 'success'
+            )
+        `, (err) => {
+            if (err) {
+                logger.error(`创建summaries表失败: ${err.message}`);
+            } else {
+                logger.info('summaries表已创建或已存在');
+                // 获取总记录数
+                this.db.get("SELECT COUNT(*) as count FROM summaries", (err, row) => {
+                    if (err) {
+                        logger.error(`获取summaries总数失败: ${err.message}`);
+                    } else {
+                        logger.info(`数据库共有 ${row.count} 条总结记录`);
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -249,6 +255,24 @@ class DatabaseManager {
                 logger.error(`创建screen_name索引失败: ${err.message}`);
             } else {
                 logger.debug('已创建screen_name索引');
+            }
+        });
+
+        // 总结表索引 - 优化按时间段查询
+        this.db.run(`CREATE INDEX IF NOT EXISTS idx_summaries_period ON summaries(period)`, (err) => {
+            if (err) {
+                logger.error(`创建summaries_period索引失败: ${err.message}`);
+            } else {
+                logger.debug('已创建summaries_period索引');
+            }
+        });
+
+        // 总结表时间索引 - 优化按生成时间查询
+        this.db.run(`CREATE INDEX IF NOT EXISTS idx_summaries_created_at ON summaries(created_at)`, (err) => {
+            if (err) {
+                logger.error(`创建summaries_created_at索引失败: ${err.message}`);
+            } else {
+                logger.debug('已创建summaries_created_at索引');
             }
         });
     }
@@ -859,9 +883,130 @@ class DatabaseManager {
             logger.error(`清理语句缓存时出错: ${error.message}`);
         }
     }
+
+    /**
+     * 保存AI生成的总结到数据库
+     * @param {string} period - 总结的时间段 (1hour, 12hours, 1day)
+     * @param {string} content - 总结内容
+     * @param {Date} startTime - 总结的开始时间
+     * @param {Date} endTime - 总结的结束时间
+     * @param {number} tweetCount - 包含的推文数量
+     * @param {string} status - 状态 (success, error)
+     * @returns {Promise<Object>} 操作结果
+     */
+    async saveSummary(period, content, startTime, endTime, tweetCount, status = 'success') {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            const now = new Date().toISOString();
+            const startIsoString = startTime.toISOString();
+            const endIsoString = endTime.toISOString();
+
+            this.db.run(`
+                INSERT INTO summaries (
+                    period, content, start_time, end_time, 
+                    tweet_count, created_at, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            `, [
+                period,
+                content,
+                startIsoString,
+                endIsoString,
+                tweetCount,
+                now,
+                status
+            ], function (err) {
+                if (err) {
+                    logger.error(`保存总结失败: ${err.message}`);
+                    return reject(err);
+                }
+
+                logger.info(`已成功保存${period}总结 (ID: ${this.lastID})`);
+                resolve({
+                    id: this.lastID,
+                    period,
+                    tweetCount,
+                    created_at: now
+                });
+            });
+        });
+    }
+
+    /**
+     * 获取最新的总结
+     * @param {string} period - 时间段 (1hour, 12hours, 1day)
+     * @returns {Promise<Object>} 总结对象
+     */
+    async getLatestSummary(period) {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            this.db.get(`
+                SELECT 
+                    id, period, content, start_time, end_time, 
+                    tweet_count, created_at, status
+                FROM summaries
+                WHERE period = ? AND status = 'success'
+                ORDER BY created_at DESC
+                LIMIT 1
+            `, [period], (err, row) => {
+                if (err) {
+                    logger.error(`获取${period}最新总结失败: ${err.message}`);
+                    return reject(err);
+                }
+
+                if (!row) {
+                    logger.warn(`未找到${period}的总结记录`);
+                    return resolve(null);
+                }
+
+                logger.info(`获取到${period}最新总结 (ID: ${row.id}, 创建时间: ${row.created_at})`);
+                resolve(row);
+            });
+        });
+    }
+
+    /**
+     * 获取指定时间段的所有总结
+     * @param {string} period - 时间段 (1hour, 12hours, 1day)
+     * @param {number} limit - 限制返回数量
+     * @returns {Promise<Array>} 总结对象数组
+     */
+    async getSummaryHistory(period, limit = 10) {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            this.db.all(`
+                SELECT 
+                    id, period, content, start_time, end_time, 
+                    tweet_count, created_at, status
+                FROM summaries
+                WHERE period = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            `, [period, limit], (err, rows) => {
+                if (err) {
+                    logger.error(`获取${period}总结历史失败: ${err.message}`);
+                    return reject(err);
+                }
+
+                logger.info(`获取到${rows.length}条${period}总结历史记录`);
+                resolve(rows);
+            });
+        });
+    }
 }
 
-// 导出类和常量
+// 导出模块
 module.exports = {
     DatabaseManager,
     CONFIG

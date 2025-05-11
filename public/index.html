@@ -78,6 +78,14 @@
             cursor: not-allowed;
         }
 
+        .btn-small {
+            padding: 8px 16px;
+            display: inline-block;
+            width: auto;
+            font-size: 13px;
+            margin-left: 10px;
+        }
+
         #summary {
             padding: 16px;
             border-radius: 16px;
@@ -97,6 +105,33 @@
             font-size: 13px;
             text-align: right;
             margin-top: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .meta-info {
+            margin-top: 8px;
+            padding: 8px;
+            background-color: #f5f8fa;
+            border-radius: 8px;
+            font-size: 13px;
+            color: var(--muted-color);
+        }
+
+        .time-section {
+            display: flex;
+            align-items: center;
+        }
+
+        .regenerate {
+            background-color: #f7f9fa;
+            border: 1px solid var(--border-color);
+            color: var(--primary-color);
+        }
+
+        .regenerate:hover {
+            background-color: #e8f5fe;
         }
 
         /* 总结内容样式 */
@@ -146,6 +181,32 @@
             background-color: #f2f7fb;
             color: var(--muted-color);
         }
+
+        .period-tabs {
+            display: flex;
+            margin-bottom: 16px;
+            overflow: hidden;
+            border-radius: 50px;
+            background: #f0f3f5;
+        }
+
+        .period-tab {
+            flex: 1;
+            padding: 10px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: var(--muted-color);
+            transition: all 0.2s;
+        }
+
+        .period-tab.active {
+            background-color: var(--primary-color);
+            color: white;
+        }
     </style>
 </head>
 
@@ -155,46 +216,205 @@
             <h1>Twitter Hourly</h1>
         </header>
 
-        <button id="hourBtn" class="btn">获取最近1小时总结</button>
-
-        <div id="summary" class="card">
-            <p style="text-align: center; color: var(--muted-color);">点击上方按钮获取最新总结</p>
+        <div class="period-tabs">
+            <button id="tab1hour" class="period-tab active">最近1小时</button>
+            <button id="tab12hours" class="period-tab">最近12小时</button>
+            <button id="tab1day" class="period-tab">最近1天</button>
         </div>
 
-        <div class="timestamp" id="timestamp"></div>
+        <div id="summary" class="card">
+            <p style="text-align: center; color: var(--muted-color);">正在加载总结...</p>
+        </div>
+
+        <div class="timestamp" id="timestamp">
+            <div class="time-section">
+                <span id="timeInfo">更新时间: 加载中...</span>
+                <button id="refreshBtn" class="btn btn-small regenerate" style="display:none;">刷新</button>
+            </div>
+            <div id="dataCount"></div>
+        </div>
     </div>
 
     <script>
-        document.getElementById('hourBtn').addEventListener('click', async function () {
-            const button = this;
-            const summaryDiv = document.getElementById('summary');
-            const timestampDiv = document.getElementById('timestamp');
+        // 确保DOM完全加载后再执行脚本
+        document.addEventListener('DOMContentLoaded', function () {
+            // 添加超时控制的fetch函数
+            async function fetchWithTimeout(url, options = {}, timeout = 30000) {
+                const controller = new AbortController();
+                const { signal } = controller;
 
-            // 禁用按钮并显示加载状态
-            button.disabled = true;
-            summaryDiv.innerHTML = '<div class="loading">AI正在生成总结，请稍候...</div>';
+                const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-            try {
-                // 调用API获取1小时总结
-                const response = await fetch('/api/summary/1hour');
-
-                if (!response.ok) {
-                    throw new Error('获取总结失败');
+                try {
+                    const response = await fetch(url, { ...options, signal });
+                    clearTimeout(timeoutId);
+                    return response;
+                } catch (error) {
+                    clearTimeout(timeoutId);
+                    throw error;
                 }
+            }
 
-                const data = await response.json();
+            // 获取DOM元素
+            const summaryDiv = document.getElementById('summary');
+            const timestampDiv = document.getElementById('timeInfo');
+            const dataCountDiv = document.getElementById('dataCount');
+            const refreshBtn = document.getElementById('refreshBtn');
+            const tab1hour = document.getElementById('tab1hour');
+            const tab12hours = document.getElementById('tab12hours');
+            const tab1day = document.getElementById('tab1day');
 
-                // 更新界面
-                summaryDiv.innerHTML = data.summary;
-                timestampDiv.textContent = '更新时间: ' + new Date().toLocaleString();
-            } catch (error) {
-                summaryDiv.innerHTML = `<div class="error-message">
-                    <h3>❌ 获取总结失败</h3>
-                    <p>${error.message}</p>
-                </div>`;
-            } finally {
-                // 重新启用按钮
-                button.disabled = false;
+            let currentPeriod = '1hour';
+
+            // 设置活动标签
+            function setActiveTab(period) {
+                tab1hour.classList.remove('active');
+                tab12hours.classList.remove('active');
+                tab1day.classList.remove('active');
+
+                if (period === '1hour') tab1hour.classList.add('active');
+                else if (period === '12hours') tab12hours.classList.add('active');
+                else if (period === '1day') tab1day.classList.add('active');
+            }
+
+            // 初始化加载总结
+            loadSummary('1hour');
+
+            // 切换时间段
+            tab1hour.addEventListener('click', function () {
+                if (currentPeriod !== '1hour') {
+                    currentPeriod = '1hour';
+                    setActiveTab(currentPeriod);
+                    loadSummary(currentPeriod);
+                }
+            });
+
+            tab12hours.addEventListener('click', function () {
+                if (currentPeriod !== '12hours') {
+                    currentPeriod = '12hours';
+                    setActiveTab(currentPeriod);
+                    loadSummary(currentPeriod);
+                }
+            });
+
+            tab1day.addEventListener('click', function () {
+                if (currentPeriod !== '1day') {
+                    currentPeriod = '1day';
+                    setActiveTab(currentPeriod);
+                    loadSummary(currentPeriod);
+                }
+            });
+
+            // 刷新按钮事件
+            refreshBtn.addEventListener('click', function () {
+                this.disabled = true;
+                this.textContent = '刷新中...';
+
+                // 手动触发生成新总结
+                fetch(`/api/summary/${currentPeriod}/generate`, {
+                    method: 'POST'
+                })
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error('生成新总结失败');
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        console.log('生成成功:', data);
+                        // 加载新生成的总结
+                        loadSummary(currentPeriod);
+                    })
+                    .catch(error => {
+                        console.error('生成失败:', error);
+                        this.textContent = '刷新失败';
+                        setTimeout(() => {
+                            this.disabled = false;
+                            this.textContent = '刷新';
+                        }, 3000);
+                    });
+            });
+
+            // 加载指定时间段的总结
+            async function loadSummary(period) {
+                try {
+                    // 显示加载状态
+                    summaryDiv.innerHTML = '<div class="loading">正在加载总结数据...</div>';
+                    timestampDiv.textContent = '更新时间: 加载中...';
+                    dataCountDiv.textContent = '';
+                    refreshBtn.style.display = 'none';
+
+                    // 从API获取最新总结
+                    const response = await fetchWithTimeout(`/api/summary/${period}`);
+
+                    if (!response.ok) {
+                        let errorMessage = `HTTP错误：${response.status}`;
+
+                        try {
+                            const errorData = await response.json();
+                            errorMessage = errorData.error || errorMessage;
+                        } catch (e) {
+                            const errorText = await response.text();
+                            if (errorText) errorMessage += ` - ${errorText}`;
+                        }
+
+                        throw new Error(errorMessage);
+                    }
+
+                    // 解析JSON响应
+                    const data = await response.json();
+                    console.log('API返回数据:', data);
+
+                    // 检查返回的数据格式
+                    if (!data || typeof data.summary !== 'string') {
+                        console.error('无效数据格式:', data);
+                        throw new Error('API返回数据格式无效');
+                    }
+
+                    // 更新界面
+                    summaryDiv.innerHTML = data.summary;
+
+                    // 添加元数据信息
+                    const metaInfo = document.createElement('div');
+                    metaInfo.className = 'meta-info';
+
+                    // 格式化时间范围
+                    const startTime = new Date(data.start_time || '');
+                    const endTime = new Date(data.end_time || '');
+                    const validTimeRange = !isNaN(startTime) && !isNaN(endTime);
+
+                    let timeRangeText = '';
+                    if (validTimeRange) {
+                        const startStr = startTime.toLocaleString();
+                        const endStr = endTime.toLocaleString();
+                        timeRangeText = `<p>数据时间范围: ${startStr} 至 ${endStr}</p>`;
+                    }
+
+                    // 显示时间戳和数据计数
+                    timestampDiv.textContent = `更新时间: ${data.formatted_time || new Date().toLocaleString()}`;
+                    dataCountDiv.textContent = `数据量: ${data.tweet_count || 0} 条推文`;
+
+                    // 显示刷新按钮
+                    refreshBtn.disabled = false;
+                    refreshBtn.textContent = '刷新';
+                    refreshBtn.style.display = 'inline-block';
+
+                } catch (error) {
+                    console.error('获取总结失败:', error);
+
+                    summaryDiv.innerHTML = `<div class="error-message">
+                        <h3>❌ 获取总结失败</h3>
+                        <p>${error.message}</p>
+                        <p>请稍后再试或联系管理员</p>
+                    </div>`;
+
+                    timestampDiv.textContent = '加载失败';
+
+                    // 显示刷新按钮
+                    refreshBtn.disabled = false;
+                    refreshBtn.textContent = '重试';
+                    refreshBtn.style.display = 'inline-block';
+                }
             }
         });
     </script>

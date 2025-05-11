@@ -1,11 +1,5 @@
-.venv
-.env
-
-webhook.log
-
-/data/twitter_data.csv
-
-node_modules/
-package-lock.json
-*.log
 data/
+logs/
+node_modules/
+.env
+package-lock.json
