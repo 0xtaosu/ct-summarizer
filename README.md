@@ -66,13 +66,13 @@
 
 3. 创建配置文件：
    ```
-   cp .env.example .env
+   cp env.example .env
    ```
 
 4. 修改配置文件 `.env`，填入必要的 API 密钥：
    ```
    KOOSOCIAL_API_KEY=your_api_key_here
-   GEMINI_API_KEY=your_api_key_here
+   GEMINI_API_KEY=your_gemini_api_key_here
    PORT=5001  # 可选，默认为 5000
    ```
 
@@ -204,6 +204,7 @@ node index.js
 ├── start.sh               # 启动脚本
 ├── stop.sh                # 停止脚本
 ├── status.sh              # 状态查看脚本
+├── env.example            # 环境变量示例文件
 └── README.md              # 说明文档
 ```
 
