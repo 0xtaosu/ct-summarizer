@@ -846,6 +846,81 @@ function main() {
         // 创建采集器实例
         const poller = new TwitterPoller();
 
+        // 检查命令行参数
+        const args = process.argv.slice(2);
+
+        // 处理获取关注列表的命令
+        if (args.includes('--fetch-followings')) {
+            logger.info('检测到 --fetch-followings 参数，将获取关注列表...');
+
+            // 查找是否指定了用户
+            let targetUser = SPIDER_CONFIG.FOLLOWER_SOURCE_ACCOUNT; // 默认使用配置的源账号
+            let userIdMode = false;
+
+            const userIndex = args.indexOf('--user');
+            const userIdIndex = args.indexOf('--userid');
+
+            if (userIndex !== -1 && args.length > userIndex + 1) {
+                targetUser = args[userIndex + 1];
+                logger.info(`将使用指定的用户名: ${targetUser}`);
+            } else if (userIdIndex !== -1 && args.length > userIdIndex + 1) {
+                targetUser = args[userIdIndex + 1];
+                userIdMode = true;
+                logger.info(`将使用指定的用户ID: ${targetUser}`);
+            } else {
+                logger.info(`将使用配置文件中的源账号: ${targetUser}`);
+            }
+
+            logger.info(`开始获取 ${targetUser} 的关注列表...`);
+
+            // 执行关注列表获取
+            poller.fetchAndStoreAllFollowings(targetUser)
+                .then(stats => {
+                    logger.info(`成功完成关注列表获取操作: 共获取 ${stats.totalFollowings} 个用户`);
+                    logger.info(`新增用户: ${stats.newFollowings}, 更新用户: ${stats.updatedFollowings}`);
+
+                    // 检查是否需要立即收集推文
+                    if (args.includes('--collect-after')) {
+                        logger.info('检测到 --collect-after 参数，将立即开始收集推文数据...');
+                        return poller.pollAllUsers().then(tweetStats => {
+                            logger.info(`推文收集完成: 共处理 ${tweetStats.usersProcessed} 个用户, 收集了 ${tweetStats.totalTweets} 条推文`);
+                            poller.close();
+                            process.exit(0);
+                        });
+                    } else {
+                        logger.info('关注列表获取已完成。如需立即收集推文，请使用 --collect-after 参数');
+                        poller.close();
+                        process.exit(0);
+                    }
+                })
+                .catch(error => {
+                    logger.error(`获取关注列表失败: ${error.message}`);
+                    poller.close();
+                    process.exit(1);
+                });
+
+            return; // 不继续执行下面的代码
+        }
+
+        // 单独收集推文的命令
+        if (args.includes('--collect-tweets')) {
+            logger.info('检测到 --collect-tweets 参数，将立即收集所有用户的推文...');
+
+            poller.pollAllUsers()
+                .then(stats => {
+                    logger.info(`推文收集完成: 共处理 ${stats.usersProcessed} 个用户, 收集了 ${stats.totalTweets} 条推文`);
+                    poller.close();
+                    process.exit(0);
+                })
+                .catch(error => {
+                    logger.error(`收集推文失败: ${error.message}`);
+                    poller.close();
+                    process.exit(1);
+                });
+
+            return; // 不继续执行下面的代码
+        }
+
         // 根据环境变量决定启动模式
         if (process.env.TEST_MODE === 'true') {
             logger.info('以测试模式运行...');

@@ -140,6 +140,46 @@
             margin-bottom: 12px;
         }
 
+        /* 项目列表样式 */
+        .project-item {
+            margin-bottom: 24px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .project-item h3 {
+            padding: 12px;
+            background-color: #f2f7fb;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 16px;
+        }
+
+        .project-details {
+            list-style-type: none;
+            padding: 0;
+        }
+
+        .project-details li {
+            padding: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .project-details li:last-child {
+            border-bottom: none;
+        }
+
+        .project-details strong {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--muted-color);
+        }
+
+        .discussion div {
+            margin-bottom: 8px;
+        }
+
+        /* 保留原有表格样式以兼容旧数据 */
         .token-table {
             width: 100%;
             border-collapse: collapse;
@@ -238,7 +278,10 @@
     <script>
         // 确保DOM完全加载后再执行脚本
         document.addEventListener('DOMContentLoaded', function () {
-            // 添加超时控制的fetch函数
+            /**
+             * 带超时控制的fetch函数封装
+             * 避免请求无限等待的问题
+             */
             async function fetchWithTimeout(url, options = {}, timeout = 30000) {
                 const controller = new AbortController();
                 const { signal } = controller;
@@ -264,9 +307,13 @@
             const tab12hours = document.getElementById('tab12hours');
             const tab1day = document.getElementById('tab1day');
 
+            // 当前激活的时间段
             let currentPeriod = '1hour';
 
-            // 设置活动标签
+            /**
+             * 设置活动标签
+             * @param {string} period - 要激活的时间段
+             */
             function setActiveTab(period) {
                 tab1hour.classList.remove('active');
                 tab12hours.classList.remove('active');
@@ -280,7 +327,7 @@
             // 初始化加载总结
             loadSummary('1hour');
 
-            // 切换时间段
+            // 绑定时间段切换事件
             tab1hour.addEventListener('click', function () {
                 if (currentPeriod !== '1hour') {
                     currentPeriod = '1hour';
@@ -305,7 +352,10 @@
                 }
             });
 
-            // 刷新按钮事件
+            /**
+             * 刷新按钮点击事件处理
+             * 手动触发生成新总结
+             */
             refreshBtn.addEventListener('click', function () {
                 this.disabled = true;
                 this.textContent = '刷新中...';
@@ -335,7 +385,10 @@
                     });
             });
 
-            // 加载指定时间段的总结
+            /**
+             * 加载指定时间段的总结
+             * @param {string} period - 时间段 ('1hour', '12hours', '1day')
+             */
             async function loadSummary(period) {
                 try {
                     // 显示加载状态
@@ -343,6 +396,25 @@
                     timestampDiv.textContent = '更新时间: 加载中...';
                     dataCountDiv.textContent = '';
                     refreshBtn.style.display = 'none';
+
+                    /**
+                     * 转换为北京时间的辅助函数
+                     * @param {Date} date - 要转换的日期对象
+                     * @returns {string} 格式化的北京时间字符串
+                     */
+                    const formatToBeiJingTime = (date) => {
+                        // 创建一个新日期并加上8小时时差
+                        const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+                        return beijingDate.toLocaleString('zh-CN', {
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: false
+                        });
+                    };
 
                     // 从API获取最新总结
                     const response = await fetchWithTimeout(`/api/summary/${period}`);
@@ -374,24 +446,10 @@
                     // 更新界面
                     summaryDiv.innerHTML = data.summary;
 
-                    // 添加元数据信息
-                    const metaInfo = document.createElement('div');
-                    metaInfo.className = 'meta-info';
-
-                    // 格式化时间范围
-                    const startTime = new Date(data.start_time || '');
-                    const endTime = new Date(data.end_time || '');
-                    const validTimeRange = !isNaN(startTime) && !isNaN(endTime);
-
-                    let timeRangeText = '';
-                    if (validTimeRange) {
-                        const startStr = startTime.toLocaleString();
-                        const endStr = endTime.toLocaleString();
-                        timeRangeText = `<p>数据时间范围: ${startStr} 至 ${endStr}</p>`;
-                    }
-
-                    // 显示时间戳和数据计数
-                    timestampDiv.textContent = `更新时间: ${data.formatted_time || new Date().toLocaleString()}`;
+                    // 格式化时间戳和时间范围
+                    // 优先使用后端的格式化时间
+                    const updateTime = data.formatted_time || formatToBeiJingTime(new Date(data.created_at));
+                    timestampDiv.textContent = `更新时间: ${updateTime} (北京时间)`;
                     dataCountDiv.textContent = `数据量: ${data.tweet_count || 0} 条推文`;
 
                     // 显示刷新按钮
@@ -402,6 +460,7 @@
                 } catch (error) {
                     console.error('获取总结失败:', error);
 
+                    // 显示错误信息
                     summaryDiv.innerHTML = `<div class="error-message">
                         <h3>❌ 获取总结失败</h3>
                         <p>${error.message}</p>

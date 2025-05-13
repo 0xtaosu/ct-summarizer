@@ -23,7 +23,7 @@
      - 每12小时（0:10和12:10）生成12小时总结 
      - 每24小时（0:10）生成24小时总结
      - 系统启动时立即生成所有时间段的总结
-   - 使用 DeepSeek API 生成智能摘要
+   - 使用 Google Gemini API 生成智能摘要
    - 提供简洁美观的 Web 界面展示摘要
    - 支持不同时间段（1小时、12小时、1天）的总结查看
    - 总结结果存储在数据库中，避免重复生成
@@ -72,7 +72,7 @@
 4. 修改配置文件 `.env`，填入必要的 API 密钥：
    ```
    KOOSOCIAL_API_KEY=your_api_key_here
-   DEEPSEEK_API_KEY=your_api_key_here
+   GEMINI_API_KEY=your_api_key_here
    PORT=5001  # 可选，默认为 5000
    ```
 

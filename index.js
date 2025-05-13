@@ -3,7 +3,7 @@
  * 
  * 核心功能:
  * 1. 定时从SQLite数据库读取Twitter数据
- * 2. 使用DeepSeek AI模型生成分析总结
+ * 2. 使用Gemini AI模型生成分析总结
  * 3. 将生成的总结存储到数据库
  * 4. 提供Web界面查看总结结果
  */
@@ -15,7 +15,7 @@ require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { default: OpenAI } = require('openai');
+const axios = require('axios');
 const schedule = require('node-schedule');
 
 // 自定义模块
@@ -25,6 +25,93 @@ const { SYSTEM_PROMPT, AI_CONFIG } = require('./config');
 
 // 设置日志记录器
 const logger = createLogger('summary');
+
+//-----------------------------------------------------------------------------
+// 日期和时间工具函数
+//-----------------------------------------------------------------------------
+/**
+ * 日期和时间处理工具
+ */
+const TimeUtil = {
+    /**
+     * 转换日期为北京时间
+     * @param {Date} date - 要转换的日期对象
+     * @returns {string} 格式化的北京时间字符串
+     */
+    formatToBeiJingTime(date) {
+        // 创建一个新日期并加上8小时时差
+        const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+        return beijingDate.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+    },
+
+    /**
+     * 获取指定时间段的毫秒数
+     * @param {string} period - 时间段 ('1hour', '12hours', '1day')
+     * @returns {number} 对应的毫秒数
+     */
+    getTimeDeltaForPeriod(period) {
+        const timeDelta = {
+            '1hour': 60 * 60 * 1000,
+            '12hours': 12 * 60 * 60 * 1000,
+            '1day': 24 * 60 * 60 * 1000
+        };
+        return timeDelta[period] || timeDelta['1hour'];
+    },
+
+    /**
+     * 计算指定时间段的开始和结束时间
+     * @param {string} period - 时间段 ('1hour', '12hours', '1day')
+     * @returns {Object} 包含开始和结束时间的对象
+     */
+    calculateTimeRange(period) {
+        // 获取当前时间并向下取整到最近的小时的结束时间
+        const now = new Date();
+        const currentHour = new Date(now);
+        currentHour.setMinutes(0, 0, 0);
+        currentHour.setHours(currentHour.getHours() + 1); // 设为下一个整点小时
+
+        // 计算开始时间，基于整点计算
+        let queryStart;
+
+        if (period === '1hour') {
+            // 一小时报告：整点到整点
+            queryStart = new Date(currentHour);
+            queryStart.setHours(queryStart.getHours() - 1); // 上一个整点
+        } else if (period === '12hours') {
+            // 12小时报告：整点到整点，覆盖12个小时
+            queryStart = new Date(currentHour);
+            queryStart.setHours(queryStart.getHours() - 12);
+        } else if (period === '1day') {
+            // 24小时/日报：整点到整点，覆盖24个小时
+            queryStart = new Date(currentHour);
+            queryStart.setHours(queryStart.getHours() - 24);
+        } else {
+            // 默认情况：使用传统的相对时间计算
+            const timeDelta = this.getTimeDeltaForPeriod(period);
+            queryStart = new Date(now.getTime() - timeDelta);
+        }
+
+        // 使用当前小时结束作为结束时间（下一个整点）
+        const queryEnd = currentHour;
+
+        return {
+            start: queryStart,
+            end: queryEnd,
+            startFormatted: queryStart.toISOString(),
+            endFormatted: queryEnd.toISOString(),
+            beijingStart: this.formatToBeiJingTime(queryStart),
+            beijingEnd: this.formatToBeiJingTime(queryEnd)
+        };
+    }
+};
 
 //-----------------------------------------------------------------------------
 // 请求节流控制功能
@@ -61,6 +148,9 @@ class RequestThrottler {
 // 核心总结器类
 //-----------------------------------------------------------------------------
 class TwitterSummarizer {
+    /**
+     * 构造函数：初始化Twitter数据分析和总结系统
+     */
     constructor() {
         this._initializeAIClient();
         this._initializeDatabase();
@@ -73,26 +163,33 @@ class TwitterSummarizer {
         this.scheduleJobs();
     }
 
+    /**
+     * 初始化AI客户端
+     * @private
+     */
     _initializeAIClient() {
-        const apiKey = process.env.DEEPSEEK_API_KEY;
-        if (!apiKey) {
-            throw new Error("DEEPSEEK_API_KEY not found in environment variables");
+        // 获取API密钥
+        const geminiKey = process.env.GEMINI_API_KEY;
+
+        // 检查是否有Gemini API密钥
+        if (!geminiKey) {
+            throw new Error("未找到GEMINI_API_KEY环境变量，请在.env文件中设置");
         }
 
-        this.client = new OpenAI({
-            apiKey: apiKey,
-            baseURL: "https://api.deepseek.com",
-            timeout: 300000, // 5分钟超时
-            maxRetries: 3,
-            defaultHeaders: {
-                "User-Agent": "Mozilla/5.0 CT-Twitter-Summarizer/1.0"
-            },
-            defaultQuery: {
-                stream: false
-            }
-        });
+        logger.info('使用Gemini API初始化HTTP客户端');
+
+        // 使用axios创建HTTP客户端
+        this.geminiApiKey = geminiKey;
+        this.geminiBaseUrl = "https://generativelanguage.googleapis.com/v1/models";
+        this.geminiModel = AI_CONFIG.model;
+
+        logger.info(`AI客户端初始化成功，使用模型: ${this.geminiModel}`);
     }
 
+    /**
+     * 初始化数据库连接
+     * @private
+     */
     _initializeDatabase() {
         try {
             const dbPath = path.join('data', 'twitter_data.db');
@@ -108,6 +205,9 @@ class TwitterSummarizer {
         }
     }
 
+    /**
+     * 设置定时任务
+     */
     scheduleJobs() {
         // 在启动时生成一次所有时间段的总结
         logger.info('生成启动时的初始总结...');
@@ -139,6 +239,11 @@ class TwitterSummarizer {
         logger.info('已设置定时总结任务');
     }
 
+    /**
+     * 生成并保存指定时间段的总结
+     * @param {string} period - 时间段 ('1hour', '12hours', '1day')
+     * @returns {Promise<Object|null>} - 生成的总结对象或null
+     */
     async generateAndSaveSummary(period) {
         const canProceed = await this.throttler.acquireRequest();
         if (!canProceed) {
@@ -148,24 +253,38 @@ class TwitterSummarizer {
 
         try {
             logger.info(`开始自动生成${period}总结...`);
-            const now = new Date();
-            const timeDelta = this._getTimeDeltaForPeriod(period);
-            const queryStart = new Date(now.getTime() - timeDelta);
 
-            const tweets = await this.getPeriodData(period);
+            // 使用TimeUtil计算时间范围
+            const timeRange = TimeUtil.calculateTimeRange(period);
+            const queryStart = timeRange.start;
+            const queryEnd = timeRange.end;
+
+            const tweets = await this.db.getTweetsInTimeRange(queryStart, queryEnd);
 
             if (!tweets || tweets.length === 0) {
                 logger.warn(`没有找到${period}内的推文数据，跳过总结生成`);
-                await this._saveEmptySummary(period, queryStart, now);
+                await this._saveEmptySummary(period, queryStart, queryEnd);
                 return null;
             }
 
             const summary = await this.generateSummary(period);
+
+            // 额外确保清理内容中的代码块标记
+            let cleanedSummary = summary;
+            if (typeof summary === 'string') {
+                // 移除开头的```html、``` 等标记
+                cleanedSummary = cleanedSummary.replace(/^```(?:html)?\s*/g, '');
+                // 移除结尾的``` 标记
+                cleanedSummary = cleanedSummary.replace(/```\s*$/g, '');
+                // 移除中间可能出现的代码块标记
+                cleanedSummary = cleanedSummary.replace(/```(?:html)?|```/g, '');
+            }
+
             const result = await this.db.saveSummary(
                 period,
-                summary,
+                cleanedSummary,
                 queryStart,
-                now,
+                queryEnd,
                 tweets.length,
                 'success'
             );
@@ -181,28 +300,40 @@ class TwitterSummarizer {
         }
     }
 
-    async _saveEmptySummary(period, queryStart, now) {
+    /**
+     * 保存空数据总结到数据库
+     * @param {string} period - 时间段
+     * @param {Date} queryStart - 开始时间
+     * @param {Date} queryEnd - 结束时间
+     * @private
+     */
+    async _saveEmptySummary(period, queryStart, queryEnd) {
         await this.db.saveSummary(
             period,
             `<div class="no-data-message"><h3>📭 没有新数据</h3><p>在过去${period}内没有发现新的推文活动</p></div>`,
             queryStart,
-            now,
+            queryEnd,
             0,
             'empty'
         );
     }
 
+    /**
+     * 保存错误总结到数据库
+     * @param {string} period - 时间段
+     * @param {Error} error - 错误对象
+     * @private
+     */
     async _saveErrorSummary(period, error) {
         try {
-            const now = new Date();
-            const timeDelta = this._getTimeDeltaForPeriod(period);
-            const queryStart = new Date(now.getTime() - timeDelta);
+            // 使用TimeUtil计算时间范围
+            const timeRange = TimeUtil.calculateTimeRange(period);
 
             await this.db.saveSummary(
                 period,
                 `<div class="error-message"><h3>❌ 生成总结时出错</h3><p>${error.message}</p></div>`,
-                queryStart,
-                now,
+                timeRange.start,
+                timeRange.end,
                 0,
                 'error'
             );
@@ -211,21 +342,19 @@ class TwitterSummarizer {
         }
     }
 
-    _getTimeDeltaForPeriod(period) {
-        const timeDelta = {
-            '1hour': 60 * 60 * 1000,
-            '12hours': 12 * 60 * 60 * 1000,
-            '1day': 24 * 60 * 60 * 1000
-        };
-        return timeDelta[period] || timeDelta['1hour'];
-    }
-
+    /**
+     * 获取指定时间段的推文数据
+     * @param {string} period - 时间段
+     * @returns {Promise<Array>} 推文数组
+     */
     async getPeriodData(period) {
-        const now = new Date();
-        const delta = this._getTimeDeltaForPeriod(period);
-        const queryStart = new Date(now.getTime() - delta);
+        // 使用TimeUtil计算时间范围
+        const timeRange = TimeUtil.calculateTimeRange(period);
+        const queryStart = timeRange.start;
+        const queryEnd = timeRange.end;
 
-        logger.info(`开始查询过去${period}的推文数据 (${queryStart.toISOString()} 至 ${now.toISOString()})`);
+        logger.info(`开始查询${period}的推文数据 (${timeRange.startFormatted} 至 ${timeRange.endFormatted})`);
+        logger.info(`时间范围: 从 ${queryStart.toLocaleString()} 到 ${queryEnd.toLocaleString()}`);
 
         try {
             if (!this.db) {
@@ -234,10 +363,10 @@ class TwitterSummarizer {
             }
 
             logger.info(`正在从数据库获取时间范围内的推文...`);
-            const tweets = await this.db.getTweetsInTimeRange(queryStart, now);
+            const tweets = await this.db.getTweetsInTimeRange(queryStart, queryEnd);
 
             this._logTweetResults(tweets, period);
-            this.lastSummaryTime[period] = now;
+            this.lastSummaryTime[period] = new Date();
             return tweets;
         } catch (error) {
             logger.error(`获取${period}数据时出错:`, error);
@@ -245,6 +374,12 @@ class TwitterSummarizer {
         }
     }
 
+    /**
+     * 输出推文结果日志
+     * @param {Array} tweets - 推文数组
+     * @param {string} period - 时间段
+     * @private
+     */
     _logTweetResults(tweets, period) {
         if (tweets.length === 0) {
             logger.warn(`未找到指定时间范围内的推文数据 (${period})`);
@@ -254,6 +389,11 @@ class TwitterSummarizer {
         }
     }
 
+    /**
+     * 输出示例推文日志
+     * @param {Array} tweets - 推文数组
+     * @private
+     */
     _logSampleTweets(tweets) {
         const sampleCount = Math.min(tweets.length, 3);
         for (let i = 0; i < sampleCount; i++) {
@@ -266,6 +406,11 @@ class TwitterSummarizer {
         }
     }
 
+    /**
+     * 为指定时间段生成总结
+     * @param {string} period - 时间段
+     * @returns {Promise<string>} 总结HTML内容
+     */
     async generateSummary(period) {
         try {
             logger.info(`开始为${period}生成总结...`);
@@ -274,7 +419,13 @@ class TwitterSummarizer {
                 return this._getDbErrorHtml();
             }
 
-            const tweets = await this.getPeriodData(period);
+            // 使用TimeUtil计算时间范围
+            const timeRange = TimeUtil.calculateTimeRange(period);
+            const queryStart = timeRange.start;
+            const queryEnd = timeRange.end;
+
+            logger.info(`生成${period}总结，时间范围: 从 ${queryStart.toLocaleString()} 到 ${queryEnd.toLocaleString()}`);
+            const tweets = await this.db.getTweetsInTimeRange(queryStart, queryEnd);
 
             if (!tweets || tweets.length === 0) {
                 return this._getNoDataHtml(period);
@@ -284,18 +435,32 @@ class TwitterSummarizer {
             const tweetsText = this._formatTweetsForAI(tweets);
             logger.debug(`生成的推文文本长度: ${tweetsText.length} 字符`);
 
-            const userPrompt = `请分析过去${period}的以下Twitter推文并生成结构化市场总结：\n${tweetsText}`;
+            // 使用北京时间范围
+            const timeRangeStr = `${timeRange.beijingStart} 到 ${timeRange.beijingEnd} (北京时间)`;
+
+            const userPrompt = `请分析以下时间范围内的Twitter推文并生成结构化市场总结：\n时间范围: ${timeRangeStr}\n\n${tweetsText}\n\n特别提醒：
+1. 请直接输出HTML内容，不要使用任何代码块标记（如\`\`\`html\`\`\`）包围你的回答
+2. 使用有序列表和无序列表来组织信息，不要使用表格
+3. 确保HTML结构清晰，缩进合理，便于阅读
+4. 对于每个项目或代币，使用<h3>标题和嵌套列表<ul><li>来组织信息`;
             logger.info('正在调用AI生成总结...');
 
             const content = await this._callAIWithRetry(userPrompt);
             logger.info(`AI总结生成完成，内容长度: ${content.length} 字符`);
 
-            if (content.length > 100000) {
-                logger.warn(`生成的内容过长 (${content.length} 字符)，可能导致传输问题`);
-                return content.substring(0, 100000) + '...[内容过长，已截断]';
+            // 处理内容，移除可能的代码块标记
+            let cleanedContent = content;
+            // 移除开头的```html、``` 等标记
+            cleanedContent = cleanedContent.replace(/^```(?:html)?\s*/, '');
+            // 移除结尾的``` 标记
+            cleanedContent = cleanedContent.replace(/```\s*$/, '');
+
+            if (cleanedContent.length > 100000) {
+                logger.warn(`生成的内容过长 (${cleanedContent.length} 字符)，可能导致传输问题`);
+                return cleanedContent.substring(0, 100000) + '...[内容过长，已截断]';
             }
 
-            return content;
+            return cleanedContent;
         } catch (error) {
             const errorMsg = `生成${period}总结时出错: ${error}`;
             logger.error(errorMsg);
@@ -303,8 +468,14 @@ class TwitterSummarizer {
         }
     }
 
+    /**
+     * 格式化推文数据用于AI输入
+     * @param {Array} tweets - 推文数组
+     * @returns {string} 格式化后的文本
+     * @private
+     */
     _formatTweetsForAI(tweets) {
-        return tweets.map(tweet => {
+        const formattedTweets = tweets.map(tweet => {
             const tweetUrl = `https://x.com/${tweet.screen_name}/status/${tweet.id}`;
             return `用户: ${tweet.username} (@${tweet.screen_name})\n` +
                 `发布时间: ${tweet.created_at}\n` +
@@ -314,14 +485,19 @@ class TwitterSummarizer {
                 `\n源: ${tweetUrl}` +
                 '\n' + '='.repeat(30);
         }).join('\n');
+
+        // 在格式化文本的末尾添加提醒
+        return formattedTweets + '\n\n注意：请直接输出HTML内容，不要使用代码块标记包围回答。请使用有序列表和无序列表，不要使用表格。确保HTML结构清晰，缩进合理。';
     }
 
+    /**
+     * 调用AI API并支持重试机制
+     * @param {string} userPrompt - 用户提示
+     * @returns {Promise<string>} AI生成的文本
+     * @private
+     */
     async _callAIWithRetry(userPrompt) {
         const timeoutMs = 300000; // 5分钟超时
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('AI生成总结请求超时，请稍后重试')), timeoutMs)
-        );
-
         const maxRetries = 2;
         let lastError = null;
 
@@ -332,26 +508,43 @@ class TwitterSummarizer {
                     await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
                 }
 
-                const response = await Promise.race([
-                    this.client.chat.completions.create({
-                        model: AI_CONFIG.model,
-                        messages: [
-                            { role: "system", content: SYSTEM_PROMPT },
-                            { role: "user", content: userPrompt }
-                        ],
-                        temperature: AI_CONFIG.temperature,
-                        max_tokens: 4000,
-                        timeout: 300000
-                    }),
-                    timeoutPromise
-                ]);
+                logger.info(`使用Gemini模型发送HTTP请求...`);
 
-                if (!response || !response.choices || !response.choices[0] || !response.choices[0].message) {
-                    logger.error('API返回数据无效:', JSON.stringify(response).substring(0, 500));
-                    throw new Error('API返回结构不符合预期');
+                // 构建请求URL
+                const url = `${this.geminiBaseUrl}/${this.geminiModel}:generateContent?key=${this.geminiApiKey}`;
+
+                // 构建请求体
+                const requestBody = {
+                    contents: [
+                        { role: "user", parts: [{ text: `${SYSTEM_PROMPT}\n\n${userPrompt}` }] }
+                    ],
+                    generationConfig: {
+                        temperature: AI_CONFIG.temperature,
+                        maxOutputTokens: 4000,
+                    }
+                };
+
+                // 发送请求
+                const response = await axios.post(url, requestBody, {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: timeoutMs
+                });
+
+                // 检查响应
+                if (!response || !response.data || !response.data.candidates || !response.data.candidates[0]) {
+                    logger.error('Gemini API返回数据无效');
+                    throw new Error('Gemini API返回空响应');
                 }
 
-                return response.choices[0].message.content;
+                // 提取文本内容
+                const candidate = response.data.candidates[0];
+                if (!candidate.content || !candidate.content.parts || !candidate.content.parts[0]) {
+                    throw new Error('响应格式不符合预期');
+                }
+
+                return candidate.content.parts[0].text;
             } catch (retryError) {
                 lastError = retryError;
                 logger.error(`AI调用尝试 ${attempt + 1}/${maxRetries + 1} 失败:`, retryError.message);
@@ -369,6 +562,11 @@ class TwitterSummarizer {
         throw lastError || new Error("所有重试尝试均失败");
     }
 
+    /**
+     * 获取数据库错误的HTML消息
+     * @returns {string} 错误消息HTML
+     * @private
+     */
     _getDbErrorHtml() {
         return `<div class="error-message">
             <h3>😕 无法获取数据</h3>
@@ -381,6 +579,12 @@ class TwitterSummarizer {
         </div>`;
     }
 
+    /**
+     * 获取无数据的HTML消息
+     * @param {string} period - 时间段
+     * @returns {string} 无数据消息HTML
+     * @private
+     */
     _getNoDataHtml(period) {
         return `<div class="no-data-message">
             <h3>📭 没有新数据</h3>
@@ -388,6 +592,12 @@ class TwitterSummarizer {
         </div>`;
     }
 
+    /**
+     * 获取错误的HTML消息
+     * @param {string} message - 错误消息
+     * @returns {string} 错误消息HTML
+     * @private
+     */
     _getErrorHtml(message) {
         return `<div class="error-message">
             <h3>❌ 生成总结时出错</h3>
@@ -395,16 +605,49 @@ class TwitterSummarizer {
         </div>`;
     }
 
+    /**
+     * 清理资源并关闭连接
+     */
     cleanup() {
         if (this.db) {
             this.db.close();
         }
+    }
+
+    /**
+     * 启动服务
+     * @returns {Promise<void>}
+     */
+    async start() {
+        try {
+            // 初始化所有服务
+            await this._initializeServices();
+        } catch (error) {
+            logger.error('系统启动失败:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * 初始化服务的钩子方法（用于未来扩展）
+     * @returns {Promise<boolean>}
+     * @private
+     */
+    async _initializeServices() {
+        logger.info('正在初始化服务...');
+        // 所有初始化已经在构造函数中完成，这里作为未来扩展的钩子
+        return true;
     }
 }
 
 //-----------------------------------------------------------------------------
 // Web服务器设置
 //-----------------------------------------------------------------------------
+/**
+ * 设置Web服务器
+ * @param {TwitterSummarizer} summarizer - 总结器实例
+ * @returns {express.Application} Express应用实例
+ */
 function setupWebServer(summarizer) {
     const app = express();
     app.use(express.json());
@@ -416,6 +659,11 @@ function setupWebServer(summarizer) {
     return app;
 }
 
+/**
+ * 配置服务器中间件和目录
+ * @param {express.Application} app - Express应用实例
+ * @private
+ */
 function _configureServer(app) {
     // 增加请求超时设置 - 解决502错误问题
     app.use((req, res, next) => {
@@ -431,6 +679,12 @@ function _configureServer(app) {
     }
 }
 
+/**
+ * 设置API路由
+ * @param {express.Application} app - Express应用实例
+ * @param {TwitterSummarizer} summarizer - 总结器实例
+ * @private
+ */
 function _setupRoutes(app, summarizer) {
     // 健康检查端点
     app.get('/health', (req, res) => {
@@ -508,7 +762,7 @@ function _setupRoutes(app, summarizer) {
                 history: history.map(item => ({
                     id: item.id,
                     created_at: item.created_at,
-                    formatted_time: new Date(item.created_at).toLocaleString(),
+                    formatted_time: TimeUtil.formatToBeiJingTime(new Date(item.created_at)),
                     tweet_count: item.tweet_count,
                     status: item.status,
                     start_time: item.start_time,
@@ -555,26 +809,44 @@ function _setupRoutes(app, summarizer) {
     });
 }
 
+/**
+ * 格式化总结响应对象
+ * @param {Object} summary - 总结对象
+ * @returns {Object} 格式化后的响应对象
+ * @private
+ */
 function _formatSummaryResponse(summary) {
     const createdAt = new Date(summary.created_at);
-    const formattedTime = createdAt.toLocaleString();
+
+    // 使用TimeUtil转换为北京时间
+    const formattedTime = TimeUtil.formatToBeiJingTime(createdAt);
 
     return {
         summary: summary.content,
         created_at: summary.created_at,
         formatted_time: formattedTime,
         tweet_count: summary.tweet_count,
-        period: summary.period
+        period: summary.period,
+        start_time: summary.start_time,
+        end_time: summary.end_time
     };
 }
 
 //-----------------------------------------------------------------------------
 // 入口点函数
 //-----------------------------------------------------------------------------
-function main() {
+/**
+ * 系统主入口函数
+ * 初始化总结器和Web服务器，并设置进程退出处理
+ */
+async function main() {
     try {
         logger.info('正在启动Twitter数据分析和总结系统...');
+
+        // 初始化总结器和Web服务器
         const summarizer = new TwitterSummarizer();
+        await summarizer.start();
+
         const app = setupWebServer(summarizer);
 
         const PORT = process.env.PORT || 5000;
@@ -611,5 +883,6 @@ if (require.main === module) {
 // 导出模块
 module.exports = {
     TwitterSummarizer,
-    setupWebServer
+    setupWebServer,
+    TimeUtil  // 导出时间工具，供其他模块使用
 };
