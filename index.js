@@ -709,6 +709,7 @@ function _setupRoutes(app, summarizer) {
     // 获取指定时间段的总结
     app.get('/api/summary/:period', async (req, res) => {
         const { period } = req.params;
+        const summaryId = req.query.id; // 新增：支持通过ID查询特定报告
         const validPeriods = ['1hour', '12hours', '1day'];
 
         if (!validPeriods.includes(period)) {
@@ -720,8 +721,19 @@ function _setupRoutes(app, summarizer) {
         }
 
         try {
-            logger.info(`接收到Web请求：获取${period}总结`);
-            const summary = await summarizer.db.getLatestSummary(period);
+            logger.info(`接收到Web请求：获取${period}总结${summaryId ? ` (ID: ${summaryId})` : ''}`);
+
+            let summary;
+            if (summaryId) {
+                // 如果提供了ID，获取特定的总结
+                summary = await summarizer.db.getSummaryById(summaryId);
+                if (!summary) {
+                    return res.status(404).json({ error: `未找到ID为${summaryId}的总结记录` });
+                }
+            } else {
+                // 否则获取最新的总结
+                summary = await summarizer.db.getLatestSummary(period);
+            }
 
             if (!summary) {
                 logger.warn(`未找到${period}的总结记录，尝试生成新总结`);

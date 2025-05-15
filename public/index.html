@@ -247,6 +247,95 @@
             background-color: var(--primary-color);
             color: white;
         }
+
+        /* 时间线样式 */
+        .timeline-container {
+            margin-top: 24px;
+            border-radius: 16px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            background-color: var(--card-color);
+            padding: 16px;
+        }
+
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .timeline-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--primary-color);
+        }
+
+        .timeline-list {
+            list-style-type: none;
+            padding: 0;
+        }
+
+        .timeline-item {
+            padding: 12px;
+            border-bottom: 1px solid var(--border-color);
+            cursor: pointer;
+            transition: background-color 0.2s;
+            margin-bottom: 8px;
+        }
+
+        .timeline-item:nth-child(odd) {
+            background-color: var(--background-color);
+        }
+
+        .timeline-item:hover {
+            background-color: #f2f7fb;
+        }
+
+        .timeline-item-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .timeline-time {
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .timeline-date {
+            color: var(--muted-color);
+            font-size: 13px;
+        }
+
+        .timeline-stats {
+            color: var(--muted-color);
+            font-size: 13px;
+        }
+
+        .timeline-item.selected {
+            background-color: #e8f5fe;
+            border-left: 3px solid var(--primary-color);
+        }
+
+        .load-more {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            margin-top: 16px;
+            background: none;
+            border: 1px dashed var(--border-color);
+            border-radius: 8px;
+            color: var(--primary-color);
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .load-more:hover {
+            background-color: #f2f7fb;
+        }
     </style>
 </head>
 
@@ -257,9 +346,9 @@
         </header>
 
         <div class="period-tabs">
-            <button id="tab1hour" class="period-tab active">最近1小时</button>
-            <button id="tab12hours" class="period-tab">最近12小时</button>
-            <button id="tab1day" class="period-tab">最近1天</button>
+            <button id="tab1hour" class="period-tab active">1小时</button>
+            <button id="tab12hours" class="period-tab">12小时</button>
+            <button id="tab1day" class="period-tab">24小时</button>
         </div>
 
         <div id="summary" class="card">
@@ -272,6 +361,20 @@
                 <button id="refreshBtn" class="btn btn-small regenerate" style="display:none;">刷新</button>
             </div>
             <div id="dataCount"></div>
+        </div>
+
+        <!-- 添加历史报告时间线 -->
+        <div class="timeline-container">
+            <div class="timeline-header">
+                <div class="timeline-title">历史报告</div>
+            </div>
+            <ul id="timeline-list" class="timeline-list">
+                <!-- 时间线项目将通过JavaScript动态插入 -->
+                <li class="timeline-item" style="text-align:center; color:var(--muted-color);">
+                    加载中...
+                </li>
+            </ul>
+            <button id="load-more" class="load-more">加载更多</button>
         </div>
     </div>
 
@@ -306,9 +409,15 @@
             const tab1hour = document.getElementById('tab1hour');
             const tab12hours = document.getElementById('tab12hours');
             const tab1day = document.getElementById('tab1day');
+            const timelineList = document.getElementById('timeline-list');
+            const loadMoreBtn = document.getElementById('load-more');
 
             // 当前激活的时间段
             let currentPeriod = '1hour';
+            // 历史记录页码
+            let historyPage = 1;
+            // 每页加载的历史记录数量
+            const historyPageSize = 10;
 
             /**
              * 设置活动标签
@@ -326,6 +435,8 @@
 
             // 初始化加载总结
             loadSummary('1hour');
+            // 初始化加载历史记录
+            loadHistory('1hour');
 
             // 绑定时间段切换事件
             tab1hour.addEventListener('click', function () {
@@ -333,6 +444,9 @@
                     currentPeriod = '1hour';
                     setActiveTab(currentPeriod);
                     loadSummary(currentPeriod);
+                    // 重置并加载该时间段的历史记录
+                    historyPage = 1;
+                    loadHistory(currentPeriod, true);
                 }
             });
 
@@ -341,6 +455,9 @@
                     currentPeriod = '12hours';
                     setActiveTab(currentPeriod);
                     loadSummary(currentPeriod);
+                    // 重置并加载该时间段的历史记录
+                    historyPage = 1;
+                    loadHistory(currentPeriod, true);
                 }
             });
 
@@ -349,7 +466,16 @@
                     currentPeriod = '1day';
                     setActiveTab(currentPeriod);
                     loadSummary(currentPeriod);
+                    // 重置并加载该时间段的历史记录
+                    historyPage = 1;
+                    loadHistory(currentPeriod, true);
                 }
+            });
+
+            // 加载更多按钮点击事件
+            loadMoreBtn.addEventListener('click', function () {
+                historyPage++;
+                loadHistory(currentPeriod, false);
             });
 
             /**
@@ -374,6 +500,9 @@
                         console.log('生成成功:', data);
                         // 加载新生成的总结
                         loadSummary(currentPeriod);
+                        // 刷新历史记录
+                        historyPage = 1;
+                        loadHistory(currentPeriod, true);
                     })
                     .catch(error => {
                         console.error('生成失败:', error);
@@ -473,6 +602,178 @@
                     refreshBtn.disabled = false;
                     refreshBtn.textContent = '重试';
                     refreshBtn.style.display = 'inline-block';
+                }
+            }
+
+            /**
+             * 加载历史报告列表
+             * @param {string} period - 时间段 ('1hour', '12hours', '1day')
+             * @param {boolean} reset - 是否重置列表
+             */
+            async function loadHistory(period, reset = false) {
+                try {
+                    // 如果是重置列表，则显示加载状态
+                    if (reset) {
+                        timelineList.innerHTML = '<li class="timeline-item" style="text-align:center; color:var(--muted-color);">加载中...</li>';
+                    }
+
+                    // 禁用加载更多按钮
+                    loadMoreBtn.disabled = true;
+                    loadMoreBtn.textContent = '加载中...';
+
+                    // 从API获取历史总结
+                    const response = await fetchWithTimeout(`/api/summary/${period}/history?limit=${historyPageSize}&page=${historyPage}`);
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP错误：${response.status}`);
+                    }
+
+                    // 解析JSON响应
+                    const data = await response.json();
+                    console.log('历史数据:', data);
+
+                    // 如果是重置列表，则清空列表
+                    if (reset) {
+                        timelineList.innerHTML = '';
+                    }
+
+                    // 如果没有数据，显示提示
+                    if (!data.history || data.history.length === 0) {
+                        // 如果是第一页且没有数据
+                        if (historyPage === 1) {
+                            timelineList.innerHTML = '<li class="timeline-item" style="text-align:center; color:var(--muted-color);">暂无历史报告</li>';
+                        }
+
+                        // 隐藏加载更多按钮
+                        loadMoreBtn.style.display = 'none';
+                        return;
+                    }
+
+                    // 去重处理：对于同一时间段，只保留最新的报告
+                    // 使用Map以时间段作为键，保存最新的记录
+                    const timeRangeMap = new Map();
+
+                    data.history.forEach(item => {
+                        // 解析开始和结束时间
+                        const startTime = new Date(item.start_time);
+                        const endTime = new Date(item.end_time);
+
+                        // 计算中国时区的时间 (UTC+8)
+                        const beijingStartTime = new Date(startTime.getTime() + 8 * 60 * 60 * 1000);
+                        const beijingEndTime = new Date(endTime.getTime() + 8 * 60 * 60 * 1000);
+
+                        // 构建时间段键（格式：小时:00～小时:00）
+                        const timeRangeKey = `${beijingStartTime.getHours()}:00～${beijingEndTime.getHours()}:00`;
+
+                        // 若Map中不存在该键或当前记录的创建时间比Map中已有记录新，则更新Map
+                        if (!timeRangeMap.has(timeRangeKey) ||
+                            new Date(item.created_at) > new Date(timeRangeMap.get(timeRangeKey).created_at)) {
+                            // 添加格式化后的时间信息到item
+                            item.beijingStartTime = beijingStartTime;
+                            item.beijingEndTime = beijingEndTime;
+                            item.timeRangeStr = timeRangeKey;
+                            item.dateStr = beijingStartTime.toLocaleDateString('zh-CN', {
+                                year: 'numeric', month: '2-digit', day: '2-digit'
+                            });
+
+                            timeRangeMap.set(timeRangeKey, item);
+                        }
+                    });
+
+                    // 转换Map为数组并按创建时间从新到旧排序
+                    const uniqueItems = Array.from(timeRangeMap.values()).sort((a, b) =>
+                        new Date(b.created_at) - new Date(a.created_at)
+                    );
+
+                    // 格式化并显示历史记录
+                    uniqueItems.forEach(item => {
+                        // 创建列表项
+                        const itemHtml = `
+                            <li class="timeline-item" data-id="${item.id}" data-time="${item.timeRangeStr}">
+                                <div class="timeline-item-header">
+                                    <span class="timeline-time">${item.timeRangeStr}</span>
+                                    <span class="timeline-date">${item.dateStr}</span>
+                                </div>
+                                <div class="timeline-stats">
+                                    数据量: ${item.tweet_count || 0} 条推文
+                                </div>
+                            </li>
+                        `;
+
+                        timelineList.innerHTML += itemHtml;
+                    });
+
+                    // 为历史记录项绑定点击事件
+                    Array.from(timelineList.getElementsByClassName('timeline-item')).forEach(item => {
+                        if (item.dataset.id) {
+                            item.addEventListener('click', function () {
+                                // 移除所有项的选中状态
+                                document.querySelectorAll('.timeline-item').forEach(el => {
+                                    el.classList.remove('selected');
+                                });
+
+                                // 添加选中状态
+                                this.classList.add('selected');
+
+                                const summaryId = this.dataset.id;
+                                const timeRange = this.dataset.time;
+
+                                // 显示加载状态
+                                summaryDiv.innerHTML = '<div class="loading">正在加载历史报告...</div>';
+
+                                // 通过API获取具体报告内容 (使用已有的后端接口)
+                                fetchWithTimeout(`/api/summary/${period}?id=${summaryId}`)
+                                    .then(response => {
+                                        if (!response.ok) {
+                                            throw new Error(`获取历史报告失败: ${response.status}`);
+                                        }
+                                        return response.json();
+                                    })
+                                    .then(data => {
+                                        // 更新总结区域内容
+                                        summaryDiv.innerHTML = data.summary;
+
+                                        // 更新时间戳
+                                        timestampDiv.textContent = `报告时间段: ${timeRange} (北京时间)`;
+                                        dataCountDiv.textContent = `数据量: ${data.tweet_count || 0} 条推文`;
+                                    })
+                                    .catch(error => {
+                                        console.error('获取历史报告失败:', error);
+                                        summaryDiv.innerHTML = `<div class="error-message">
+                                            <h3>❌ 获取历史报告失败</h3>
+                                            <p>${error.message}</p>
+                                        </div>`;
+                                    });
+                            });
+                        }
+                    });
+
+                    // 如果返回的记录数少于页大小，说明没有更多记录了
+                    if (data.history.length < historyPageSize) {
+                        loadMoreBtn.style.display = 'none';
+                    } else {
+                        loadMoreBtn.style.display = 'block';
+                    }
+
+                    // 启用加载更多按钮
+                    loadMoreBtn.disabled = false;
+                    loadMoreBtn.textContent = '加载更多';
+
+                } catch (error) {
+                    console.error('获取历史记录失败:', error);
+
+                    // 如果是第一页，显示错误信息
+                    if (historyPage === 1) {
+                        timelineList.innerHTML = `
+                            <li class="timeline-item" style="text-align:center; color:var(--muted-color);">
+                                加载历史报告失败: ${error.message}
+                            </li>
+                        `;
+                    }
+
+                    // 恢复加载更多按钮
+                    loadMoreBtn.disabled = false;
+                    loadMoreBtn.textContent = '重试加载';
                 }
             }
         });

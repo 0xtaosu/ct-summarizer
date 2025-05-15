@@ -1005,9 +1005,10 @@ class DatabaseManager {
      * 获取指定时间段的所有总结
      * @param {string} period - 时间段 (1hour, 12hours, 1day)
      * @param {number} limit - 限制返回数量
+     * @param {number} offset - 起始偏移量，用于分页
      * @returns {Promise<Array>} 总结对象数组
      */
-    async getSummaryHistory(period, limit = 10) {
+    async getSummaryHistory(period, limit = 10, offset = 0) {
         return new Promise((resolve, reject) => {
             if (!this.db) {
                 logger.error('数据库未连接');
@@ -1021,15 +1022,50 @@ class DatabaseManager {
                 FROM summaries
                 WHERE period = ?
                 ORDER BY created_at DESC
-                LIMIT ?
-            `, [period, limit], (err, rows) => {
+                LIMIT ? OFFSET ?
+            `, [period, limit, offset], (err, rows) => {
                 if (err) {
                     logger.error(`获取${period}总结历史失败: ${err.message}`);
                     return reject(err);
                 }
 
-                logger.info(`获取到${rows.length}条${period}总结历史记录`);
+                logger.info(`获取到${rows.length}条${period}总结历史记录 (limit=${limit}, offset=${offset})`);
                 resolve(rows);
+            });
+        });
+    }
+
+    /**
+     * 通过ID获取特定的总结
+     * @param {number|string} id - 总结ID
+     * @returns {Promise<Object|null>} 总结对象或null
+     */
+    async getSummaryById(id) {
+        return new Promise((resolve, reject) => {
+            if (!this.db) {
+                logger.error('数据库未连接');
+                return reject(new Error('数据库未连接'));
+            }
+
+            this.db.get(`
+                SELECT 
+                    id, period, content, start_time, end_time, 
+                    tweet_count, created_at, status
+                FROM summaries
+                WHERE id = ?
+            `, [id], (err, row) => {
+                if (err) {
+                    logger.error(`通过ID获取总结失败: ${err.message}`);
+                    return reject(err);
+                }
+
+                if (!row) {
+                    logger.warn(`未找到ID为${id}的总结记录`);
+                    return resolve(null);
+                }
+
+                logger.info(`获取到ID为${id}的总结记录`);
+                resolve(row);
             });
         });
     }
