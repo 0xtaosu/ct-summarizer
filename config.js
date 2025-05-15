@@ -46,44 +46,61 @@ const SYSTEM_PROMPT = `
     <h2>📈 市场与项目动态概览</h2>
     <p>[对指定时间段内市场情绪和项目关键发展趋势进行概述，可提及热门赛道或值得关注的发射趋势]</p>
   </div>
-  <hr>
-  <div class="token-analysis">
-    <h2>💎 重点代币/项目追踪</h2>
+  <h2>💎 重点代币/项目追踪</h2>
   
-    <div class="project-item">
-      <h3>1. [代币/项目名称]</h3>
-      <ul class="project-details">
-        <li>
-          <div>
-            [简要描述该代币/项目的**近期最主要的新闻或发展**。 **如果此核心事件涉及项目发射，请在此处优先突出其预告和关键规则，并引导至下方的详细解读（如适用）。**对于其他类型的重大新闻（如重大合作、技术突破等），也在此处概述。] 
-            <a href="[主要新闻/发展来源推文链接]" target="_blank">来源</a>
-          </div>
-        </li>
-      
-        <!-- 如果上述"最新动态与核心事件"包含项目发射信息，则详细展开以下部分 -->
-        <li class="launch-info" style="display: none;"> <!-- 通过JS或手动判断是否显示 -->
-          <strong>🚀 发射专项解读：</strong>
-          <ul class="launch-specifics">
-            <li><strong>发射阶段/类型：</strong> [例如：种子轮预告、白名单开放、公开发售(IDO/IEO)、空投详情等] <a href="[相关推文链接]" target="_blank">来源</a></li>
-            <li><strong>关键规则与条件：</strong> [详细列出参与资格、白名单获取方式、购买限制、锁仓机制、KYC要求等] <a href="[规则说明推文链接]" target="_blank">来源</a></li>
-            <li><strong>重要时间节点：</strong> [例如：申请开始/截止时间、快照时间、销售开始/结束时间、TGE日期等] <a href="[时间表推文链接]" target="_blank">来源</a></li>
-            <li><strong>参与平台/链接：</strong> [官方公告链接、发射平台、活动页面、合约地址（如已公布）] <a href="[官方渠道推文链接]" target="_blank">来源</a></li>
-            <!-- 可根据实际信息丰富度调整或增删条目 -->
-          </ul>
-          <script>
-            // 简单的示例逻辑：如果"最新动态与核心事件"的文本中包含关键词，则显示此部分
-            // 实际应用中，你可能需要在生成HTML时就决定是否包含或显示此<li>
-            var coreEventText = document.currentScript.parentElement.parentElement.querySelector('li:first-child div').textContent.toLowerCase();
-            if (coreEventText.includes('launch') || coreEventText.includes('ido') || coreEventText.includes('ieo') || coreEventText.includes('airdrop') || coreEventText.includes('presale') || coreEventText.includes('token generation event') || coreEventText.includes('发射') || coreEventText.includes('预告') || coreEventText.includes('规则')) {
-              document.currentScript.parentElement.style.display = 'list-item';
-            }
-          </script>
-        </li>
-      </ul>
-    </div>
-  
+  <ol class="project-list">
+    <li>
+      <div class="project-item">
+        <h3>1. [代币/项目名称] ([代币符号])</h3>
+        <ul class="project-details">
+          <li>
+            <div>
+              [简要描述该代币/项目的**近期最主要的新闻或发展**。 **如果此核心事件涉及项目发射，请在此处优先突出其预告和关键规则，并引导至下方的详细解读（如适用）。**对于其他类型的重大新闻（如重大合作、技术突破等），也在此处概述。] 
+              <a href="[主要新闻/发展来源推文链接]" target="_blank">来源</a>
+            </div>
+          </li>
+        
+          <!-- 如果上述"最新动态与核心事件"包含项目发射信息，则详细展开以下部分 -->
+          <li class="launch-info" style="display: none;"> <!-- 通过JS或手动判断是否显示 -->
+            <strong>🚀 发射专项解读：</strong>
+            <ul class="launch-specifics">
+              <li><strong>发射阶段/类型：</strong> [例如：种子轮预告、白名单开放、公开发售(IDO/IEO)、空投详情等] <a href="[相关推文链接]" target="_blank">来源</a></li>
+              <li><strong>关键规则与条件：</strong> [详细列出参与资格、白名单获取方式、购买限制、锁仓机制、KYC要求等] <a href="[规则说明推文链接]" target="_blank">来源</a></li>
+              <li><strong>重要时间节点：</strong> [例如：申请开始/截止时间、快照时间、销售开始/结束时间、TGE日期等] <a href="[时间表推文链接]" target="_blank">来源</a></li>
+              <li><strong>参与平台/链接：</strong> [官方公告链接、发射平台、活动页面、合约地址（如已公布）] <a href="[官方渠道推文链接]" target="_blank">来源</a></li>
+              <!-- 可根据实际信息丰富度调整或增删条目 -->
+            </ul>
+            <script>
+              // 简单的示例逻辑：如果"最新动态与核心事件"的文本中包含关键词，则显示此部分
+              // 实际应用中，你可能需要在生成HTML时就决定是否包含或显示此<li>
+              var coreEventText = document.currentScript.parentElement.parentElement.querySelector('li:first-child div').textContent.toLowerCase();
+              if (coreEventText.includes('launch') || coreEventText.includes('ido') || coreEventText.includes('ieo') || coreEventText.includes('airdrop') || coreEventText.includes('presale') || coreEventText.includes('token generation event') || coreEventText.includes('发射') || coreEventText.includes('预告') || coreEventText.includes('规则')) {
+                document.currentScript.parentElement.style.display = 'list-item';
+              }
+            </script>
+          </li>
+        </ul>
+      </div>
+    </li>
+    
+    <!-- 更多项目条目 -->
+    <li>
+      <div class="project-item">
+        <h3>2. [代币/项目名称] ([代币符号])</h3>
+        <ul class="project-details">
+          <li>
+            <div>
+              [项目描述和关键动态...] 
+              <a href="[推文链接]" target="_blank">来源</a>
+            </div>
+          </li>
+          <!-- 如需添加发射信息，重复上面的结构 -->
+        </ul>
+      </div>
+    </li>
+    
     <!-- 为每个代币/项目重复上述结构 -->
-  </div>
+  </ol>
 </div>
 
 确保内容简洁，总结不超过10个关键代币/项目，重点分析那些在指定时间段内有最重要新闻/发展（**尤其是明确的发射预告和规则**）的项目。适量使用emoji增强可读性。引用原始推文链接使读者能够访问原始信息来源。
