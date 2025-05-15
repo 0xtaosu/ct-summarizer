@@ -72,35 +72,46 @@ const TimeUtil = {
      * @returns {Object} 包含开始和结束时间的对象
      */
     calculateTimeRange(period) {
-        // 获取当前时间并向下取整到最近的小时的结束时间
+        // 获取当前时间，计算最近的过去整点时间（上一个整点）
         const now = new Date();
-        const currentHour = new Date(now);
-        currentHour.setMinutes(0, 0, 0);
-        currentHour.setHours(currentHour.getHours() + 1); // 设为下一个整点小时
+        const lastHour = new Date(now);
+        lastHour.setMinutes(0, 0, 0);
 
-        // 计算开始时间，基于整点计算
-        let queryStart;
+        // 如果当前时间的分钟是0，则上一个整点应该是当前小时的前一小时
+        if (now.getMinutes() === 0 && now.getSeconds() === 0) {
+            lastHour.setHours(lastHour.getHours() - 1);
+        }
+
+        // 计算开始时间和结束时间
+        let queryStart, queryEnd;
 
         if (period === '1hour') {
-            // 一小时报告：整点到整点
-            queryStart = new Date(currentHour);
-            queryStart.setHours(queryStart.getHours() - 1); // 上一个整点
+            // 计算"上上个整点"作为开始时间
+            queryEnd = new Date(lastHour); // 上一个整点作为结束时间
+            queryStart = new Date(lastHour);
+            queryStart.setHours(queryStart.getHours() - 1); // 上上个整点作为开始时间
+
+            logger.info(`1小时范围：从${queryStart.toLocaleString()}到${queryEnd.toLocaleString()}`);
         } else if (period === '12hours') {
-            // 12小时报告：整点到整点，覆盖12个小时
-            queryStart = new Date(currentHour);
-            queryStart.setHours(queryStart.getHours() - 12);
+            // 计算12小时前的整点作为开始时间
+            queryEnd = new Date(lastHour); // 上一个整点作为结束时间
+            queryStart = new Date(lastHour);
+            queryStart.setHours(queryStart.getHours() - 12); // 往前推12个整点小时
+
+            logger.info(`12小时范围：从${queryStart.toLocaleString()}到${queryEnd.toLocaleString()}`);
         } else if (period === '1day') {
-            // 24小时/日报：整点到整点，覆盖24个小时
-            queryStart = new Date(currentHour);
-            queryStart.setHours(queryStart.getHours() - 24);
+            // 计算24小时前的整点作为开始时间
+            queryEnd = new Date(lastHour); // 上一个整点作为结束时间
+            queryStart = new Date(lastHour);
+            queryStart.setHours(queryStart.getHours() - 24); // 往前推24个整点小时
+
+            logger.info(`24小时范围：从${queryStart.toLocaleString()}到${queryEnd.toLocaleString()}`);
         } else {
             // 默认情况：使用传统的相对时间计算
             const timeDelta = this.getTimeDeltaForPeriod(period);
-            queryStart = new Date(now.getTime() - timeDelta);
+            queryEnd = new Date(lastHour);
+            queryStart = new Date(lastHour.getTime() - timeDelta);
         }
-
-        // 使用当前小时结束作为结束时间（下一个整点）
-        const queryEnd = currentHour;
 
         return {
             start: queryStart,
@@ -742,6 +753,8 @@ function _setupRoutes(app, summarizer) {
     app.get('/api/summary/:period/history', async (req, res) => {
         const { period } = req.params;
         const limit = parseInt(req.query.limit || '10', 10);
+        const page = parseInt(req.query.page || '1', 10);
+        const offset = (page - 1) * limit;
         const validPeriods = ['1hour', '12hours', '1day'];
 
         if (!validPeriods.includes(period)) {
@@ -753,12 +766,14 @@ function _setupRoutes(app, summarizer) {
         }
 
         try {
-            logger.info(`接收到Web请求：获取${period}总结历史 (限制: ${limit}条)`);
-            const history = await summarizer.db.getSummaryHistory(period, limit);
+            logger.info(`接收到Web请求：获取${period}总结历史 (页码: ${page}, 每页显示: ${limit}条)`);
+            const history = await summarizer.db.getSummaryHistory(period, limit, offset);
 
             return res.json({
                 period,
                 count: history.length,
+                page: page,
+                limit: limit,
                 history: history.map(item => ({
                     id: item.id,
                     created_at: item.created_at,
