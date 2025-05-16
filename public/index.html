@@ -612,7 +612,14 @@
                     // 格式化时间戳和时间范围
                     // 优先使用后端的格式化时间
                     const updateTime = data.formatted_time || formatToBeiJingTime(new Date(data.created_at));
-                    timestampDiv.textContent = `更新时间: ${updateTime} (北京时间)`;
+
+                    // 如果API返回了timeRange字段，使用它来显示时间范围；否则显示更新时间
+                    if (data.timeRange) {
+                        timestampDiv.textContent = `报告时间段: ${data.timeRange} (北京时间)`;
+                    } else {
+                        timestampDiv.textContent = `更新时间: ${updateTime} (北京时间)`;
+                    }
+
                     dataCountDiv.textContent = `数据量: ${data.tweet_count || 0} 条推文`;
 
                     // 显示刷新按钮
@@ -697,7 +704,9 @@
                         const beijingEndTime = new Date(endTime.getTime() + 8 * 60 * 60 * 1000);
 
                         // 构建时间段键（格式：小时:00～小时:00）
-                        const timeRangeKey = `${beijingStartTime.getHours()}:00～${beijingEndTime.getHours()}:00`;
+                        const startHour = beijingStartTime.getHours().toString().padStart(2, '0');
+                        const endHour = beijingEndTime.getHours().toString().padStart(2, '0');
+                        const timeRangeKey = `${startHour}:00～${endHour}:00`;
 
                         // 若Map中不存在该键或当前记录的创建时间比Map中已有记录新，则更新Map
                         if (!timeRangeMap.has(timeRangeKey) ||
@@ -768,8 +777,13 @@
                                         summaryDiv.innerHTML = data.summary;
 
                                         // 更新时间戳
-                                        timestampDiv.textContent = `报告时间段: ${timeRange} (北京时间)`;
+                                        // 如果API返回了timeRange字段，则使用该字段；否则仍然使用dataset中的值
+                                        const displayTimeRange = data.timeRange || timeRange;
+                                        timestampDiv.textContent = `报告时间段: ${displayTimeRange} (北京时间)`;
                                         dataCountDiv.textContent = `数据量: ${data.tweet_count || 0} 条推文`;
+
+                                        // 隐藏刷新按钮
+                                        refreshBtn.style.display = 'none';
                                     })
                                     .catch(error => {
                                         console.error('获取历史报告失败:', error);

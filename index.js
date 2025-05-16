@@ -113,13 +113,23 @@ const TimeUtil = {
             queryStart = new Date(lastHour.getTime() - timeDelta);
         }
 
+        // 创建北京时间版本（UTC+8）
+        const beijingStart = new Date(queryStart.getTime() + 8 * 60 * 60 * 1000);
+        const beijingEnd = new Date(queryEnd.getTime() + 8 * 60 * 60 * 1000);
+
+        // 格式化北京时间，确保小时值使用两位数字
+        const beijingStartHour = beijingStart.getHours().toString().padStart(2, '0');
+        const beijingEndHour = beijingEnd.getHours().toString().padStart(2, '0');
+        const beijingTimeRange = `${beijingStartHour}:00～${beijingEndHour}:00`;
+
         return {
             start: queryStart,
             end: queryEnd,
             startFormatted: queryStart.toISOString(),
             endFormatted: queryEnd.toISOString(),
             beijingStart: this.formatToBeiJingTime(queryStart),
-            beijingEnd: this.formatToBeiJingTime(queryEnd)
+            beijingEnd: this.formatToBeiJingTime(queryEnd),
+            beijingTimeRange: beijingTimeRange
         };
     }
 };
@@ -220,14 +230,7 @@ class TwitterSummarizer {
      * 设置定时任务
      */
     scheduleJobs() {
-        // 在启动时生成一次所有时间段的总结
-        logger.info('生成启动时的初始总结...');
-        this.generateAndSaveSummary('1hour').catch(err =>
-            logger.error(`生成启动时的1小时总结失败: ${err.message}`));
-        this.generateAndSaveSummary('12hours').catch(err =>
-            logger.error(`生成启动时的12小时总结失败: ${err.message}`));
-        this.generateAndSaveSummary('1day').catch(err =>
-            logger.error(`生成启动时的1天总结失败: ${err.message}`));
+        // 不再在启动时生成所有时间段的总结
 
         // 每小时在x:10分时生成1小时总结（例如1:10, 2:10, 3:10...）
         schedule.scheduleJob('10 * * * *', async () => {
@@ -805,6 +808,7 @@ function _setupRoutes(app, summarizer) {
     // 手动触发生成新总结
     app.post('/api/summary/:period/generate', async (req, res) => {
         const { period } = req.params;
+        const summaryId = req.query.id; // 检查是否指定了历史报告ID
         const validPeriods = ['1hour', '12hours', '1day'];
 
         if (!validPeriods.includes(period)) {
@@ -813,6 +817,14 @@ function _setupRoutes(app, summarizer) {
 
         if (!summarizer) {
             return res.status(500).json({ error: 'Twitter总结器未初始化' });
+        }
+
+        // 如果指定了报告ID，说明是尝试更新历史报告，不允许这种操作
+        if (summaryId) {
+            return res.status(403).json({
+                error: '不允许更新历史报告',
+                message: '只有最新的报告可以更新'
+            });
         }
 
         try {
@@ -840,22 +852,50 @@ function _setupRoutes(app, summarizer) {
  * 格式化总结响应对象
  * @param {Object} summary - 总结对象
  * @returns {Object} 格式化后的响应对象
- * @private
  */
 function _formatSummaryResponse(summary) {
-    const createdAt = new Date(summary.created_at);
+    if (!summary) {
+        return {
+            success: false,
+            error: "未找到总结数据"
+        };
+    }
 
-    // 使用TimeUtil转换为北京时间
-    const formattedTime = TimeUtil.formatToBeiJingTime(createdAt);
+    // 解析开始和结束时间
+    const startTime = new Date(summary.start_time);
+    const endTime = new Date(summary.end_time);
+
+    // 计算中国时区的时间 (UTC+8)
+    const beijingStartTime = new Date(startTime.getTime() + 8 * 60 * 60 * 1000);
+    const beijingEndTime = new Date(endTime.getTime() + 8 * 60 * 60 * 1000);
+
+    // 格式化开始和结束的小时为两位数
+    const startHour = beijingStartTime.getHours().toString().padStart(2, '0');
+    const endHour = beijingEndTime.getHours().toString().padStart(2, '0');
+    const timeRange = `${startHour}:00～${endHour}:00`;
+
+    // 格式化完整的北京时间显示
+    const formattedTime = beijingStartTime.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
 
     return {
+        success: true,
+        id: summary.id,
         summary: summary.content,
-        created_at: summary.created_at,
-        formatted_time: formattedTime,
-        tweet_count: summary.tweet_count,
         period: summary.period,
         start_time: summary.start_time,
-        end_time: summary.end_time
+        end_time: summary.end_time,
+        tweet_count: summary.tweet_count,
+        created_at: summary.created_at,
+        formatted_time: formattedTime,
+        timeRange: timeRange
     };
 }
 
