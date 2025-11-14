@@ -916,7 +916,7 @@ async function main() {
 
         const app = setupWebServer(summarizer);
 
-        const PORT = process.env.PORT || 5000;
+        const PORT = process.env.PORT || 5001;
         const server = app.listen(PORT, () => {
             logger.info(`服务器运行在端口 ${PORT}`);
             logger.info(`访问 http://localhost:${PORT} 以使用Web界面`);

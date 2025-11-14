@@ -11,7 +11,7 @@
 本系统包含以下主要组件：
 
 1. **数据采集服务 (spider.js)**
-   - 通过 KooSocial API 获取 Twitter/X 数据
+   - 通过 RapidAPI Twitter241 API 获取 Twitter/X 数据
    - 自动定时从数据库中的用户获取最新推文
    - 支持手动获取特定账号的关注者列表(支持分页获取大量关注)
    - 数据自动存储到 SQLite 数据库
@@ -72,10 +72,14 @@
 
 4. 修改配置文件 `.env`，填入必要的 API 密钥：
    ```
-   KOOSOCIAL_API_KEY=your_api_key_here
+   RAPIDAPI_KEY=your_rapidapi_key_here
    GEMINI_API_KEY=your_gemini_api_key_here
    PORT=5001  # 可选，默认为 5000
    ```
+   
+   **获取 API 密钥：**
+   - **RapidAPI Key**: 访问 [RapidAPI Twitter241](https://rapidapi.com/rphrp1985/api/twitter241) 注册并订阅以获取密钥
+   - **Gemini API Key**: 访问 [Google AI Studio](https://ai.google.dev/) 获取免费的 Gemini API 密钥
 
 ## 使用方法
 
@@ -131,6 +135,32 @@ node index.js
 - 手动获取指定账号的关注列表（使用数字 ID）：
   ```
   node spider.js --fetch-followings --userid <Twitter用户ID>
+  ```
+
+- 导出关注列表为CSV文件：
+  ```
+  node spider.js --export-followings
+  ```
+  
+  默认导出到 `data/twitter_followings_export.csv`
+  
+  CSV文件包含以下字段：
+  - `id`: 用户ID
+  - `username`: 用户显示名称
+  - `screen_name`: Twitter用户名（@后面的名称）
+  - `name`: 用户名称
+  - `description`: 用户简介
+  - `followers_count`: 粉丝数
+  - `following_count`: 关注数
+  - `tweet_count`: 推文数
+  - `profile_image_url`: 头像URL
+  - `is_following`: 是否正在关注
+  - `is_tracked`: 是否正在跟踪
+  - `last_updated`: 最后更新时间
+
+- 导出关注列表到指定路径：
+  ```
+  node spider.js --export-followings --output /path/to/output.csv
   ```
 
 #### Web 服务 (index.js)

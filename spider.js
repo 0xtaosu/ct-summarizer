@@ -1,6 +1,6 @@
 /**
  * Twitter/X 数据收集器
- * 基于KooSocial API采集指定Twitter用户的推文数据并存储到SQLite数据库
+ * 基于RapidAPI Twitter241 API采集指定Twitter用户的推文数据并存储到SQLite数据库
  */
 
 require('dotenv').config();
@@ -10,17 +10,18 @@ const axios = require('axios');
 const schedule = require('node-schedule');
 // 使用新的集中式日志记录系统
 const { createLogger } = require('./logger');
-const { DatabaseManager, CONFIG } = require('./data');
+const { DatabaseManager } = require('./data');
 const { FOLLOWER_SOURCE_ACCOUNT } = require('./config');
 /**
  * 配置常量
  */
 const SPIDER_CONFIG = {
-    API_BASE_URL: 'https://api.koosocial.com',
+    API_BASE_URL: 'https://twitter241.p.rapidapi.com',
+    RAPIDAPI_HOST: 'twitter241.p.rapidapi.com',
     POLL_INTERVAL: '0 * * * *', // 每小时整点执行一次
-    API_REQUEST_DELAY: 100, // 请求间隔50毫秒，每秒最多20次请求
+    API_REQUEST_DELAY: 100, // 请求间隔100毫秒
     MAX_CONCURRENT_REQUESTS: 10, // 最大并发请求数
-    MAX_TWEETS_PER_REQUEST: 100, // 每次请求最多获取20条推文
+    MAX_TWEETS_PER_REQUEST: 100, // 每次请求最多获取100条推文
     FOLLOWER_SOURCE_ACCOUNT: FOLLOWER_SOURCE_ACCOUNT, // 从config.js读取关注列表源账号
     MAX_FOLLOWINGS_PER_REQUEST: 70 // API最大支持70个用户每次请求
 };
@@ -36,27 +37,35 @@ const logger = createLogger('spider');
 class TwitterPoller {
     /**
      * 构造函数
-     * @throws {Error} 如果环境变量中没有设置API密钥
+     * @param {boolean} skipApiInit - 是否跳过API初始化（用于仅需数据库操作的场景）
+     * @throws {Error} 如果环境变量中没有设置API密钥且未跳过API初始化
      */
-    constructor() {
-        // 初始化KooSocial API客户端
-        this.apiKey = process.env.KOOSOCIAL_API_KEY;
-        if (!this.apiKey) {
-            throw new Error("KOOSOCIAL_API_KEY not found in environment variables");
-        }
-
-        // 创建API客户端
-        this.client = axios.create({
-            baseURL: SPIDER_CONFIG.API_BASE_URL,
-            headers: {
-                'Content-Type': 'application/json',
-                'X-api-key': this.apiKey
-            },
-            timeout: 30000 // 设置30秒超时
-        });
-
+    constructor(skipApiInit = false) {
         // 初始化数据库 (写入模式)
         this.dbManager = new DatabaseManager(false);
+
+        // 如果跳过API初始化，则不需要API密钥
+        if (skipApiInit) {
+            logger.info('跳过API初始化，仅使用数据库功能');
+            this.client = null;
+            this.apiKey = null;
+        } else {
+            // 初始化RapidAPI客户端
+            this.apiKey = process.env.RAPIDAPI_KEY;
+            if (!this.apiKey) {
+                throw new Error("RAPIDAPI_KEY not found in environment variables");
+            }
+
+            // 创建API客户端
+            this.client = axios.create({
+                baseURL: SPIDER_CONFIG.API_BASE_URL,
+                headers: {
+                    'x-rapidapi-key': this.apiKey,
+                    'x-rapidapi-host': SPIDER_CONFIG.RAPIDAPI_HOST
+                },
+                timeout: 30000 // 设置30秒超时
+            });
+        }
 
         // 初始化统计信息
         this.stats = {
@@ -69,7 +78,7 @@ class TwitterPoller {
             totalFollowersTracked: 0
         };
 
-        logger.info('Twitter数据采集器已初始化');
+        logger.info('Twitter数据采集器已初始化（使用RapidAPI）');
     }
 
     /**
@@ -81,7 +90,7 @@ class TwitterPoller {
         try {
             logger.info(`正在获取用户 ${username} 的信息...`);
 
-            const userResponse = await this.client.get(`/api/v1/user`, {
+            const userResponse = await this.client.get(`/user`, {
                 params: { username }
             });
 
@@ -119,7 +128,7 @@ class TwitterPoller {
         try {
             logger.info(`正在获取用户 ${username} (ID: ${userId}) 的推文...`);
 
-            const tweetsResponse = await this.client.get(`/api/v1/user-tweets`, {
+            const tweetsResponse = await this.client.get(`/user-tweets`, {
                 params: {
                     user: userId,
                     count: SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST
@@ -268,7 +277,7 @@ class TwitterPoller {
             }
 
             logger.info(`API请求参数: ${JSON.stringify(params)}`);
-            const followingsResponse = await this.client.get(`/api/v1/followings`, { params });
+            const followingsResponse = await this.client.get(`/followings`, { params });
 
             // 检查顶层的cursor对象
             if (followingsResponse.data?.cursor) {
@@ -834,6 +843,124 @@ class TwitterPoller {
             currentTime: new Date()
         };
     }
+
+    /**
+     * 导出关注列表为CSV文件
+     * @param {string} outputPath - 输出文件路径（可选）
+     * @returns {Promise<Object>} 导出结果统计
+     */
+    async exportFollowingsToCSV(outputPath = null) {
+        try {
+            logger.info('开始导出关注列表为CSV文件...');
+
+            // 从数据库获取所有用户
+            const users = await this.dbManager.getAllUsers();
+
+            if (!users || users.length === 0) {
+                logger.warn('数据库中没有用户数据，无法导出');
+                return {
+                    success: false,
+                    message: '数据库中没有用户数据',
+                    count: 0
+                };
+            }
+
+            logger.info(`从数据库获取到 ${users.length} 个用户`);
+
+            // 设置默认输出路径
+            const defaultPath = path.join('data', 'twitter_followings_export.csv');
+            const filePath = outputPath || defaultPath;
+
+            // 确保data目录存在
+            const dirPath = path.dirname(filePath);
+            if (!fs.existsSync(dirPath)) {
+                fs.mkdirSync(dirPath, { recursive: true });
+                logger.info(`已创建目录: ${dirPath}`);
+            }
+
+            // 准备CSV内容
+            // CSV头部
+            const headers = [
+                'id',
+                'username',
+                'screen_name',
+                'name',
+                'description',
+                'followers_count',
+                'following_count',
+                'tweet_count',
+                'profile_image_url',
+                'is_following',
+                'is_tracked',
+                'last_updated'
+            ];
+
+            // 构建CSV行
+            const csvLines = [headers.join(',')];
+
+            // 添加每个用户的数据
+            for (const user of users) {
+                const row = [
+                    user.id || '',
+                    this._escapeCSVField(user.username || ''),
+                    user.screen_name || '',
+                    this._escapeCSVField(user.name || ''),
+                    this._escapeCSVField(user.description || ''),
+                    user.followers_count || 0,
+                    user.following_count || 0,
+                    user.tweet_count || 0,
+                    user.profile_image_url || '',
+                    user.is_following || 0,
+                    user.is_tracked || 0,
+                    user.last_updated || ''
+                ];
+                csvLines.push(row.join(','));
+            }
+
+            // 写入文件
+            const csvContent = csvLines.join('\n');
+            fs.writeFileSync(filePath, csvContent, 'utf-8');
+
+            logger.info(`成功导出 ${users.length} 个用户到文件: ${filePath}`);
+
+            return {
+                success: true,
+                filePath: filePath,
+                count: users.length,
+                message: `成功导出 ${users.length} 个用户`
+            };
+        } catch (error) {
+            logger.error(`导出关注列表为CSV时出错: ${error.message}`);
+            return {
+                success: false,
+                message: `导出失败: ${error.message}`,
+                count: 0
+            };
+        }
+    }
+
+    /**
+     * 转义CSV字段（处理包含逗号、引号和换行符的字段）
+     * @param {string} field - 要转义的字段
+     * @returns {string} 转义后的字段
+     * @private
+     */
+    _escapeCSVField(field) {
+        if (field == null) {
+            return '';
+        }
+
+        const fieldStr = String(field);
+
+        // 如果字段包含逗号、双引号或换行符，需要用双引号包围
+        if (fieldStr.includes(',') || fieldStr.includes('"') || fieldStr.includes('\n') || fieldStr.includes('\r')) {
+            // 将字段中的双引号转义为两个双引号
+            const escapedField = fieldStr.replace(/"/g, '""');
+            return `"${escapedField}"`;
+        }
+
+        return fieldStr;
+    }
 }
 
 /**
@@ -843,11 +970,53 @@ function main() {
     try {
         logger.info('启动Twitter数据采集器...');
 
-        // 创建采集器实例
-        const poller = new TwitterPoller();
-
         // 检查命令行参数
         const args = process.argv.slice(2);
+
+        // 处理导出关注列表为CSV的命令（不需要API密钥）
+        if (args.includes('--export-followings')) {
+            // 创建采集器实例（跳过API初始化）
+            const poller = new TwitterPoller(true);
+            logger.info('检测到 --export-followings 参数，将导出关注列表为CSV文件...');
+
+            // 查找是否指定了输出路径
+            const outputIndex = args.indexOf('--output');
+            let outputPath = null;
+
+            if (outputIndex !== -1 && args.length > outputIndex + 1) {
+                outputPath = args[outputIndex + 1];
+                logger.info(`将使用指定的输出路径: ${outputPath}`);
+            }
+
+            // 执行导出操作
+            poller.exportFollowingsToCSV(outputPath)
+                .then(result => {
+                    if (result.success) {
+                        logger.info(`✓ ${result.message}`);
+                        logger.info(`文件路径: ${result.filePath}`);
+                        console.log(`\n导出成功！`);
+                        console.log(`- 导出用户数: ${result.count}`);
+                        console.log(`- 文件路径: ${result.filePath}`);
+                    } else {
+                        logger.error(`✗ ${result.message}`);
+                        console.log(`\n导出失败: ${result.message}`);
+                    }
+
+                    poller.close();
+                    process.exit(result.success ? 0 : 1);
+                })
+                .catch(error => {
+                    logger.error(`导出关注列表失败: ${error.message}`);
+                    console.log(`\n导出失败: ${error.message}`);
+                    poller.close();
+                    process.exit(1);
+                });
+
+            return; // 不继续执行下面的代码
+        }
+
+        // 为其他命令创建需要API的采集器实例
+        const poller = new TwitterPoller();
 
         // 处理获取关注列表的命令
         if (args.includes('--fetch-followings')) {

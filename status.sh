@@ -50,7 +50,8 @@ if [ -f "logs/index.pid" ]; then
             echo "  Web端口: $PORT (未监听)"
         fi
     else
-        echo "  状态: 已停止 (PID文件存在但进程不存在)"
+        echo "  状态: 已停止 (PIDlsof -i :5000
+文件存在但进程不存在)"
     fi
 else
     echo "  状态: 未运行 (找不到PID文件)"
