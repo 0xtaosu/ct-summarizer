@@ -239,6 +239,83 @@ class TwitterPoller {
     }
 
     /**
+     * 获取Twitter列表的推文时间线
+     * @param {string} listId - Twitter列表ID
+     * @param {number} count - 获取推文数量（可选，默认100）
+     * @returns {Promise<Array>} 推文对象数组
+     */
+    async getListTimeline(listId, count = 100) {
+        try {
+            logger.info(`正在获取列表 ${listId} 的推文时间线...`);
+
+            const timelineResponse = await this.client.get(`/list-timeline`, {
+                params: {
+                    listId: listId,
+                    count: count
+                }
+            });
+
+            // 验证响应数据结构
+            if (!timelineResponse.data?.result?.timeline?.instructions) {
+                logger.error(`无法获取列表 ${listId} 的推文，API返回数据格式不符合预期`);
+                return [];
+            }
+
+            // 寻找TimelineAddEntries指令
+            const addEntriesInstruction = timelineResponse.data.result.timeline.instructions.find(
+                instruction => instruction.type === 'TimelineAddEntries'
+            );
+
+            if (!addEntriesInstruction?.entries) {
+                logger.error(`列表 ${listId} 的推文数据结构不符合预期，找不到TimelineAddEntries指令或entries`);
+                return [];
+            }
+
+            const processedTweets = [];
+            let validEntries = 0;
+            let nonTweetEntries = 0;
+
+            // 处理每个推文
+            for (const entry of addEntriesInstruction.entries) {
+                const tweet = this.extractTweetFromEntry(entry);
+                if (tweet) {
+                    validEntries++;
+
+                    // 尝试提取用户信息
+                    const tweetResults = entry.content?.itemContent?.tweet_results;
+                    const tweetData = tweetResults?.result;
+                    const userInfo = tweetData?.core?.user_results?.result;
+
+                    if (userInfo?.legacy) {
+                        tweet.user_id = userInfo.rest_id;
+                        tweet.username = userInfo.legacy.name;
+                        tweet.screen_name = userInfo.legacy.screen_name;
+                    } else {
+                        // 如果无法提取用户信息，使用占位符
+                        tweet.user_id = 'unknown';
+                        tweet.username = 'Unknown User';
+                        tweet.screen_name = 'unknown';
+                    }
+
+                    processedTweets.push(tweet);
+                } else {
+                    // 统计非推文条目
+                    nonTweetEntries++;
+                }
+            }
+
+            // 详细日志记录处理结果
+            const totalEntries = addEntriesInstruction.entries.length;
+            logger.info(`成功获取列表 ${listId} 的 ${processedTweets.length} 条推文 (API返回条目总数: ${totalEntries}, 有效推文: ${validEntries}, 非推文条目: ${nonTweetEntries})`);
+
+            return processedTweets;
+        } catch (error) {
+            this.logApiError(error, `获取列表 ${listId} 推文时间线时出错`);
+            return [];
+        }
+    }
+
+    /**
      * 获取用户的关注列表（用户关注的人）
      * @param {string} username - 目标用户名
      * @param {string} cursor - 分页游标
@@ -1083,6 +1160,67 @@ function main() {
                 })
                 .catch(error => {
                     logger.error(`收集推文失败: ${error.message}`);
+                    poller.close();
+                    process.exit(1);
+                });
+
+            return; // 不继续执行下面的代码
+        }
+
+        // 获取Twitter列表推文的命令
+        if (args.includes('--fetch-list')) {
+            logger.info('检测到 --fetch-list 参数，将获取Twitter列表的推文...');
+
+            // 查找是否指定了列表ID
+            const listIdIndex = args.indexOf('--list-id');
+
+            if (listIdIndex === -1 || args.length <= listIdIndex + 1) {
+                logger.error('错误: 必须使用 --list-id 参数指定Twitter列表ID');
+                console.log('\n使用方法: node spider.js --fetch-list --list-id <列表ID>');
+                console.log('例如: node spider.js --fetch-list --list-id 78468360');
+                poller.close();
+                process.exit(1);
+                return;
+            }
+
+            const listId = args[listIdIndex + 1];
+            logger.info(`将获取列表ID: ${listId} 的推文`);
+
+            // 可选：指定获取数量
+            const countIndex = args.indexOf('--count');
+            const count = (countIndex !== -1 && args.length > countIndex + 1)
+                ? parseInt(args[countIndex + 1])
+                : 100;
+
+            // 获取列表推文
+            poller.getListTimeline(listId, count)
+                .then(async (tweets) => {
+                    if (tweets.length === 0) {
+                        logger.warn(`列表 ${listId} 未获取到推文`);
+                        console.log(`\n未获取到推文，列表ID: ${listId}`);
+                        poller.close();
+                        process.exit(0);
+                        return;
+                    }
+
+                    logger.info(`成功获取到 ${tweets.length} 条推文`);
+                    console.log(`\n成功获取 ${tweets.length} 条推文！`);
+
+                    // 保存到数据库
+                    logger.info('正在保存推文到数据库...');
+                    const saveStats = await poller.dbManager.saveTweetsToDatabase(tweets);
+
+                    logger.info(`推文保存完成: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
+                    console.log(`- 新增: ${saveStats.new}`);
+                    console.log(`- 更新: ${saveStats.updated}`);
+                    console.log(`- 跳过: ${saveStats.skipped}`);
+
+                    poller.close();
+                    process.exit(0);
+                })
+                .catch(error => {
+                    logger.error(`获取列表推文失败: ${error.message}`);
+                    console.log(`\n获取失败: ${error.message}`);
                     poller.close();
                     process.exit(1);
                 });

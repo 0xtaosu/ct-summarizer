@@ -163,6 +163,21 @@ node index.js
   node spider.js --export-followings --output /path/to/output.csv
   ```
 
+- 获取Twitter列表的推文：
+  ```
+  node spider.js --fetch-list --list-id <列表ID>
+  ```
+  
+  例如：
+  ```
+  node spider.js --fetch-list --list-id 78468360
+  ```
+  
+  可选参数 `--count` 指定获取数量（默认100）：
+  ```
+  node spider.js --fetch-list --list-id 78468360 --count 50
+  ```
+
 #### Web 服务 (index.js)
 
 - 指定端口：
