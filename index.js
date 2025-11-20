@@ -482,11 +482,17 @@ class TwitterSummarizer {
             // 使用北京时间范围
             const timeRangeStr = `${timeRange.beijingStart} 到 ${timeRange.beijingEnd} (北京时间)`;
 
-            const userPrompt = `请分析以下时间范围内的Twitter推文并生成结构化市场总结：\n时间范围: ${timeRangeStr}\n\n${tweetsText}\n\n特别提醒：
-1. 请直接输出HTML内容，不要使用任何代码块标记（如\`\`\`html\`\`\`）包围你的回答
-2. 使用有序列表和无序列表来组织信息，不要使用表格
-3. 确保HTML结构清晰，缩进合理，便于阅读
-4. 对于每个项目或代币，使用<h3>标题和嵌套列表<ul><li>来组织信息`;
+            const userPrompt = `请扮演“总结大师”，基于以下推文生成10条中文要点：
+1) 每条以 "1."、"2."... "10." 开头
+2) 聚焦事件与结论，突出数字/影响/动作，避免客套
+3) 如有来源链接，在末尾追加 [01](源链接)，多来源累加 [02][03]...
+4) 优先写出发射/空投/IDO等信号（规则、时间、参与方式），再写合作/技术/市场动向
+5) 输出紧凑的纯文本列表（不要HTML/表格/代码块）
+
+时间范围: ${timeRangeStr}
+
+以下是推文片段：
+${tweetsText}`;
             logger.info('正在调用AI生成总结...');
 
             const content = await this._callAIWithRetry(userPrompt);
@@ -530,8 +536,7 @@ class TwitterSummarizer {
                 '\n' + '='.repeat(30);
         }).join('\n');
 
-        // 在格式化文本的末尾添加提醒
-        return formattedTweets + '\n\n注意：请直接输出HTML内容，不要使用代码块标记包围回答。请使用有序列表和无序列表，不要使用表格。确保HTML结构清晰，缩进合理。';
+        return formattedTweets;
     }
 
     /**
@@ -672,8 +677,8 @@ class TwitterSummarizer {
  * @returns {express.Application} Express 应用实例
  */
 function setupWebServer(summarizer) {
-const app = express();
-app.use(express.json());
+    const app = express();
+    app.use(express.json());
     app.use(express.static('public'));
 
     _configureServer(app);
@@ -850,7 +855,7 @@ function _setupRoutes(app, summarizer) {
                 id: result.id,
                 created_at: result.created_at
             });
-    } catch (error) {
+        } catch (error) {
             logger.error(`处理手动生成总结请求时出错:`, error);
             return res.status(500).json({ error: '手动生成总结时出错: ' + error.message });
         }
