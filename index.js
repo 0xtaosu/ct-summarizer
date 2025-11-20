@@ -1,16 +1,18 @@
 /**
- * Twitter数据分析和总结系统
+ * Twitter 数据分析和总结系统
  * 
- * 核心功能:
- * 1. 定时从SQLite数据库读取Twitter数据
- * 2. 使用Gemini AI模型生成分析总结
- * 3. 将生成的总结存储到数据库
- * 4. 提供Web界面查看总结结果
+ * 核心功能：
+ * - 定时从 SQLite 数据库读取 Twitter 推文数据
+ * - 使用 Gemini AI 模型生成智能分析总结
+ * - 将生成的总结存储到数据库
+ * - 提供 Web API 和界面展示总结结果
+ * - 支持多时间段总结（1小时、12小时、24小时）
+ * 
+ * @module index
  */
 
-//-----------------------------------------------------------------------------
-// 模块导入
-//-----------------------------------------------------------------------------
+// ==================== 模块导入 ====================
+
 require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
@@ -18,25 +20,25 @@ const path = require('path');
 const axios = require('axios');
 const schedule = require('node-schedule');
 
-// 自定义模块
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
 const { SYSTEM_PROMPT, AI_CONFIG } = require('./config');
 
-// 设置日志记录器
 const logger = createLogger('summary');
 
-//-----------------------------------------------------------------------------
-// 日期和时间工具函数
-//-----------------------------------------------------------------------------
+// ==================== 时间工具函数 ====================
+
 /**
- * 日期和时间处理工具
+ * 时间处理工具集
+ * 
+ * 提供时间计算、格式化和北京时间转换功能
+ * @constant {Object}
  */
 const TimeUtil = {
     /**
-     * 转换日期为北京时间
-     * @param {Date} date - 要转换的日期对象
-     * @returns {string} 格式化的北京时间字符串
+     * 格式化日期为北京时间字符串（UTC+8）
+     * @param {Date} date - Date 对象
+     * @returns {string} 格式化的北京时间（如："2025/01/15 14:30:00"）
      */
     formatToBeiJingTime(date) {
         // 创建一个新日期并加上8小时时差
@@ -53,9 +55,9 @@ const TimeUtil = {
     },
 
     /**
-     * 获取指定时间段的毫秒数
-     * @param {string} period - 时间段 ('1hour', '12hours', '1day')
-     * @returns {number} 对应的毫秒数
+     * 获取时间段对应的毫秒数
+     * @param {string} period - 时间段标识
+     * @returns {number} 毫秒数
      */
     getTimeDeltaForPeriod(period) {
         const timeDelta = {
@@ -67,9 +69,9 @@ const TimeUtil = {
     },
 
     /**
-     * 计算指定时间段的开始和结束时间
-     * @param {string} period - 时间段 ('1hour', '12hours', '1day')
-     * @returns {Object} 包含开始和结束时间的对象
+     * 计算指定时间段的精确时间范围（基于整点时间）
+     * @param {string} period - 时间段标识（'1hour', '12hours', '1day'）
+     * @returns {Object} 时间范围对象 {start, end, beijingTimeRange, ...}
      */
     calculateTimeRange(period) {
         // 获取当前时间，计算最近的过去整点时间（上一个整点）
@@ -134,16 +136,28 @@ const TimeUtil = {
     }
 };
 
-//-----------------------------------------------------------------------------
-// 请求节流控制功能
-//-----------------------------------------------------------------------------
+// ==================== 请求节流控制 ====================
+
+/**
+ * 请求节流器
+ * 
+ * 限制并发请求数量，防止系统过载
+ */
 class RequestThrottler {
+    /**
+     * 构造节流器
+     * @param {number} [maxConcurrent=2] - 最大并发请求数
+     */
     constructor(maxConcurrent = 2) {
         this.maxConcurrent = maxConcurrent;
         this.currentRequests = 0;
         this.requestQueue = [];
     }
 
+    /**
+     * 请求获取执行权限
+     * @returns {Promise<boolean>} 是否获得权限
+     */
     async acquireRequest() {
         if (this.currentRequests < this.maxConcurrent) {
             this.currentRequests++;
@@ -155,6 +169,9 @@ class RequestThrottler {
         }
     }
 
+    /**
+     * 释放执行权限
+     */
     releaseRequest() {
         if (this.requestQueue.length > 0) {
             const nextRequest = this.requestQueue.shift();
@@ -165,12 +182,20 @@ class RequestThrottler {
     }
 }
 
-//-----------------------------------------------------------------------------
-// 核心总结器类
-//-----------------------------------------------------------------------------
+// ==================== Twitter 总结器核心类 ====================
+
+/**
+ * Twitter 总结器类
+ * 
+ * 负责：
+ * - AI 客户端和数据库初始化
+ * - 定时任务调度
+ * - 推文数据获取和总结生成
+ * - 总结结果存储
+ */
 class TwitterSummarizer {
     /**
-     * 构造函数：初始化Twitter数据分析和总结系统
+     * 构造 Twitter 总结器实例
      */
     constructor() {
         this._initializeAIClient();
@@ -226,8 +251,10 @@ class TwitterSummarizer {
         }
     }
 
+    // ==================== 定时任务调度 ====================
+
     /**
-     * 设置定时任务
+     * 设置定时任务（使用 node-schedule）
      */
     scheduleJobs() {
         // 不再在启动时生成所有时间段的总结
@@ -253,10 +280,12 @@ class TwitterSummarizer {
         logger.info('已设置定时总结任务');
     }
 
+    // ==================== 总结生成 ====================
+
     /**
-     * 生成并保存指定时间段的总结
-     * @param {string} period - 时间段 ('1hour', '12hours', '1day')
-     * @returns {Promise<Object|null>} - 生成的总结对象或null
+     * 生成并保存总结（主要入口方法）
+     * @param {string} period - 时间段标识
+     * @returns {Promise<Object|null>} 总结对象或 null
      */
     async generateAndSaveSummary(period) {
         const canProceed = await this.throttler.acquireRequest();
@@ -357,9 +386,9 @@ class TwitterSummarizer {
     }
 
     /**
-     * 获取指定时间段的推文数据
-     * @param {string} period - 时间段
-     * @returns {Promise<Array>} 推文数组
+     * 获取时间段内的推文数据
+     * @param {string} period - 时间段标识
+     * @returns {Promise<Array>} 推文对象数组
      */
     async getPeriodData(period) {
         // 使用TimeUtil计算时间范围
@@ -421,9 +450,9 @@ class TwitterSummarizer {
     }
 
     /**
-     * 为指定时间段生成总结
-     * @param {string} period - 时间段
-     * @returns {Promise<string>} 总结HTML内容
+     * 生成 AI 总结内容
+     * @param {string} period - 时间段标识
+     * @returns {Promise<string>} HTML 格式的总结内容
      */
     async generateSummary(period) {
         try {
@@ -654,17 +683,16 @@ class TwitterSummarizer {
     }
 }
 
-//-----------------------------------------------------------------------------
-// Web服务器设置
-//-----------------------------------------------------------------------------
+// ==================== Web 服务器设置 ====================
+
 /**
- * 设置Web服务器
+ * 创建并配置 Express Web 服务器
  * @param {TwitterSummarizer} summarizer - 总结器实例
- * @returns {express.Application} Express应用实例
+ * @returns {express.Application} Express 应用实例
  */
 function setupWebServer(summarizer) {
-    const app = express();
-    app.use(express.json());
+const app = express();
+app.use(express.json());
     app.use(express.static('public'));
 
     _configureServer(app);
@@ -841,7 +869,7 @@ function _setupRoutes(app, summarizer) {
                 id: result.id,
                 created_at: result.created_at
             });
-        } catch (error) {
+    } catch (error) {
             logger.error(`处理手动生成总结请求时出错:`, error);
             return res.status(500).json({ error: '手动生成总结时出错: ' + error.message });
         }
@@ -899,12 +927,15 @@ function _formatSummaryResponse(summary) {
     };
 }
 
-//-----------------------------------------------------------------------------
-// 入口点函数
-//-----------------------------------------------------------------------------
+// ==================== 系统入口 ====================
+
 /**
  * 系统主入口函数
- * 初始化总结器和Web服务器，并设置进程退出处理
+ * 
+ * 初始化并启动整个系统：
+ * - 创建总结器实例
+ * - 启动 Web 服务器
+ * - 设置进程信号处理
  */
 async function main() {
     try {
@@ -942,14 +973,15 @@ async function main() {
     }
 }
 
-// 如果是直接运行此文件，则执行主函数
+// 如果直接运行此文件（非 require 导入），则执行主函数
 if (require.main === module) {
     main();
 }
 
-// 导出模块
+// ==================== 模块导出 ====================
+
 module.exports = {
     TwitterSummarizer,
     setupWebServer,
-    TimeUtil  // 导出时间工具，供其他模块使用
+    TimeUtil
 };

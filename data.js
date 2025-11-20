@@ -1,45 +1,61 @@
 /**
- * Twitter数据库管理模块
+ * Twitter 数据库管理模块
  * 
- * 本模块负责所有与SQLite数据库相关的操作，包括：
- * - 数据库连接初始化和关闭
- * - 推文数据的查询和检索
- * - 推文数据的插入和更新
+ * 功能：
+ * - SQLite 数据库连接管理
+ * - 推文数据的 CRUD 操作
+ * - 用户信息管理
+ * - AI 总结记录存储
+ * - 数据库性能优化（索引、事务、缓存）
+ * 
+ * @module data
  */
 
 const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
-// 使用新的集中式日志记录系统
 const { createLogger } = require('./logger');
 
-// 配置常量
+// ==================== 配置常量 ====================
+
+/**
+ * 数据库配置
+ * @constant {Object}
+ */
 const CONFIG = {
     DATABASE_PATH: path.join('data', 'twitter_data.db'),
     USERS_CSV_PATH: path.join('data', 'twitter_users.csv'),
-    // 数据库性能设置 - 简化适合小型系统
+
+    // 数据库性能优化设置
     PRAGMA_SETTINGS: {
-        'journal_mode': 'WAL',          // 使用WAL模式提高写入性能
-        'synchronous': 'NORMAL',        // 适当降低同步级别
-        'cache_size': 2000,             // 适合小型系统的缓存大小
-        'temp_store': 'MEMORY'          // 临时表存储在内存中
+        'journal_mode': 'WAL',       // WAL 模式提高并发写入性能
+        'synchronous': 'NORMAL',     // 平衡性能和数据安全
+        'cache_size': 2000,          // 2000 页缓存（约 2MB）
+        'temp_store': 'MEMORY'       // 临时表存储在内存中
     },
-    // 批量操作设置
-    BATCH_SIZE: 30,                     // 小型系统适合的批处理大小
-    MAX_STATEMENT_CACHE: 20             // 减少预处理语句缓存大小
+
+    // 批处理设置
+    BATCH_SIZE: 30,                  // 每批处理 30 条记录
+    MAX_STATEMENT_CACHE: 20          // 预处理语句缓存上限
 };
 
-// 创建日志记录器
 const logger = createLogger('database');
+
+// ==================== 数据库管理类 ====================
 
 /**
  * 数据库管理类
- * 处理所有数据库操作
+ * 
+ * 负责所有数据库操作，包括：
+ * - 连接管理和配置
+ * - 表结构创建和维护
+ * - 数据查询、插入、更新
+ * - 语句缓存管理
  */
 class DatabaseManager {
     /**
-     * 构造函数
-     * @param {boolean} readOnly 是否以只读模式打开数据库
+     * 构造数据库管理器实例
+     * @param {boolean} [readOnly=false] - 是否以只读模式打开数据库
      */
     constructor(readOnly = false) {
         this.dataDir = "data";
@@ -55,9 +71,11 @@ class DatabaseManager {
         setInterval(() => this.cleanupStatementCache(), 30 * 60 * 1000);
     }
 
+    // ==================== 初始化方法 ====================
+
     /**
-     * 初始化数据库
-     * 创建必要的目录和表结构
+     * 初始化数据库连接和结构
+     * @private
      */
     init() {
         try {
@@ -299,8 +317,10 @@ class DatabaseManager {
         });
     }
 
+    // ==================== 连接管理 ====================
+
     /**
-     * 关闭数据库连接
+     * 关闭数据库连接并释放资源
      */
     close() {
         if (this.db) {
@@ -314,12 +334,13 @@ class DatabaseManager {
         }
     }
 
+    // ==================== 推文数据查询 ====================
+
     /**
-     * 从数据库获取指定时间段的推文数据
-     * 
-     * @param {Date} startTime 开始时间
-     * @param {Date} endTime 结束时间 (默认为当前时间)
-     * @returns {Promise<Array>} 推文数据数组
+     * 获取指定时间范围内的推文数据
+     * @param {Date} startTime - 开始时间
+     * @param {Date} [endTime=new Date()] - 结束时间（默认当前时间）
+     * @returns {Promise<Array>} 推文对象数组
      */
     async getTweetsInTimeRange(startTime, endTime = new Date()) {
         return new Promise((resolve, reject) => {
@@ -401,10 +422,12 @@ class DatabaseManager {
         });
     }
 
+    // ==================== 推文数据写入 ====================
+
     /**
-     * 将推文保存到数据库
-     * @param {Array} tweets - 要保存的推文数组
-     * @returns {Promise<Object>} 包含保存统计信息的对象
+     * 批量保存推文到数据库（支持新增和更新）
+     * @param {Array} tweets - 推文对象数组
+     * @returns {Promise<Object>} 统计信息 {new, updated, skipped, error}
      */
     async saveTweetsToDatabase(tweets) {
         if (!tweets || tweets.length === 0) {
@@ -633,10 +656,12 @@ class DatabaseManager {
         });
     }
 
+    // ==================== 用户数据管理 ====================
+
     /**
-     * 添加或更新用户信息
-     * @param {Object} user - 用户信息对象
-     * @returns {Promise<Object>} 操作结果
+     * 保存或更新用户信息
+     * @param {Object} user - 用户对象
+     * @returns {Promise<Object>} 操作结果 {inserted/updated: boolean, id: string}
      */
     async saveUser(user) {
         return new Promise((resolve, reject) => {
@@ -883,9 +908,11 @@ class DatabaseManager {
         });
     }
 
+    // ==================== 缓存管理 ====================
+
     /**
-     * 清理预处理语句缓存
-     * 释放语句以减少内存占用
+     * 清理预处理语句缓存（释放内存）
+     * @private
      */
     cleanupStatementCache() {
         try {
@@ -913,15 +940,17 @@ class DatabaseManager {
         }
     }
 
+    // ==================== AI 总结管理 ====================
+
     /**
-     * 保存AI生成的总结到数据库
-     * @param {string} period - 总结的时间段 (1hour, 12hours, 1day)
-     * @param {string} content - 总结内容
-     * @param {Date} startTime - 总结的开始时间
-     * @param {Date} endTime - 总结的结束时间
-     * @param {number} tweetCount - 包含的推文数量
-     * @param {string} status - 状态 (success, error)
-     * @returns {Promise<Object>} 操作结果
+     * 保存 AI 生成的总结到数据库
+     * @param {string} period - 时间段（'1hour', '12hours', '1day'）
+     * @param {string} content - HTML 格式的总结内容
+     * @param {Date} startTime - 开始时间
+     * @param {Date} endTime - 结束时间
+     * @param {number} tweetCount - 推文数量
+     * @param {string} [status='success'] - 状态（'success', 'error', 'empty'）
+     * @returns {Promise<Object>} 操作结果 {id, period, tweetCount, created_at}
      */
     async saveSummary(period, content, startTime, endTime, tweetCount, status = 'success') {
         return new Promise((resolve, reject) => {
@@ -1071,7 +1100,8 @@ class DatabaseManager {
     }
 }
 
-// 导出模块
+// ==================== 模块导出 ====================
+
 module.exports = {
     DatabaseManager,
     CONFIG

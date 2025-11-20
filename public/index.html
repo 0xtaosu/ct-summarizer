@@ -378,7 +378,7 @@
         <header>
             <h1>Twitter Hourly</h1>
         </header>
-
+        
         <div class="period-tabs">
             <button id="tab1hour" class="period-tab active">1小时</button>
             <button id="tab12hours" class="period-tab">12小时</button>
@@ -581,8 +581,8 @@
 
                     // 从API获取最新总结
                     const response = await fetchWithTimeout(`/api/summary/${period}`);
-
-                    if (!response.ok) {
+                
+                if (!response.ok) {
                         let errorMessage = `HTTP错误：${response.status}`;
 
                         try {
@@ -597,7 +597,7 @@
                     }
 
                     // 解析JSON响应
-                    const data = await response.json();
+                const data = await response.json();
                     console.log('API返回数据:', data);
 
                     // 检查返回的数据格式
@@ -605,9 +605,9 @@
                         console.error('无效数据格式:', data);
                         throw new Error('API返回数据格式无效');
                     }
-
-                    // 更新界面
-                    summaryDiv.innerHTML = data.summary;
+                
+                // 更新界面
+                summaryDiv.innerHTML = data.summary;
 
                     // 格式化时间戳和时间范围
                     // 优先使用后端的格式化时间
@@ -807,7 +807,7 @@
                     loadMoreBtn.disabled = false;
                     loadMoreBtn.textContent = '加载更多';
 
-                } catch (error) {
+            } catch (error) {
                     console.error('获取历史记录失败:', error);
 
                     // 如果是第一页，显示错误信息

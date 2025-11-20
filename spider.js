@@ -1,6 +1,13 @@
 /**
- * Twitter/X 数据收集器
- * 基于RapidAPI Twitter241 API采集指定Twitter用户的推文数据并存储到SQLite数据库
+ * Twitter/X 数据采集器
+ * 
+ * 功能：
+ * - 通过 RapidAPI Twitter241 API 采集 Twitter 用户推文数据
+ * - 获取用户关注列表和粉丝列表
+ * - 批量获取用户信息
+ * - 数据存储到 SQLite 数据库
+ * 
+ * @module spider
  */
 
 require('dotenv').config();
@@ -8,27 +15,24 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const schedule = require('node-schedule');
-// 使用新的集中式日志记录系统
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
 const { FOLLOWER_SOURCE_ACCOUNT } = require('./config');
+
 /**
  * 配置常量
  */
 const SPIDER_CONFIG = {
     API_BASE_URL: 'https://twitter241.p.rapidapi.com',
     RAPIDAPI_HOST: 'twitter241.p.rapidapi.com',
-    POLL_INTERVAL: '0 * * * *', // 每小时整点执行一次
-    API_REQUEST_DELAY: 100, // 请求间隔100毫秒
-    MAX_CONCURRENT_REQUESTS: 10, // 最大并发请求数
-    MAX_TWEETS_PER_REQUEST: 100, // 每次请求最多获取100条推文
-    FOLLOWER_SOURCE_ACCOUNT: FOLLOWER_SOURCE_ACCOUNT, // 从config.js读取关注列表源账号
-    MAX_FOLLOWINGS_PER_REQUEST: 70 // API最大支持70个用户每次请求
+    POLL_INTERVAL: '0 * * * *',           // 定时任务：每小时整点执行
+    API_REQUEST_DELAY: 100,                // API请求间隔（毫秒）
+    MAX_CONCURRENT_REQUESTS: 10,           // 最大并发请求数
+    MAX_TWEETS_PER_REQUEST: 100,           // 每次获取推文数量
+    MAX_FOLLOWINGS_PER_REQUEST: 70,        // 每次获取关注列表数量
+    FOLLOWER_SOURCE_ACCOUNT: FOLLOWER_SOURCE_ACCOUNT
 };
 
-/**
- * 配置日志记录器
- */
 const logger = createLogger('spider');
 
 /**
@@ -52,14 +56,14 @@ class TwitterPoller {
         } else {
             // 初始化RapidAPI客户端
             this.apiKey = process.env.RAPIDAPI_KEY;
-            if (!this.apiKey) {
+        if (!this.apiKey) {
                 throw new Error("RAPIDAPI_KEY not found in environment variables");
-            }
+        }
 
             // 创建API客户端
-            this.client = axios.create({
+        this.client = axios.create({
                 baseURL: SPIDER_CONFIG.API_BASE_URL,
-                headers: {
+            headers: {
                     'x-rapidapi-key': this.apiKey,
                     'x-rapidapi-host': SPIDER_CONFIG.RAPIDAPI_HOST
                 },
@@ -81,10 +85,163 @@ class TwitterPoller {
         logger.info('Twitter数据采集器已初始化（使用RapidAPI）');
     }
 
+    // ==================== 辅助方法 ====================
+
     /**
-     * 通过用户名获取Twitter用户信息
-     * @param {string} username - 要获取信息的用户名
-     * @returns {Promise<Object|null>} 包含用户ID、名称和屏幕名称的对象，失败时返回null
+     * 从API响应中提取数组数据（处理多种可能的响应结构）
+     * @param {*} data - API响应数据
+     * @param {string} arrayKey - 数组字段名（如 'users', 'ids'）
+     * @returns {Array} 提取的数组，失败时返回空数组
+     * @private
+     */
+    _extractArrayFromResponse(data, arrayKey = null) {
+        // 直接是数组
+        if (Array.isArray(data)) {
+            return data;
+        }
+
+        // 包含指定键的数组
+        if (arrayKey && data[arrayKey] && Array.isArray(data[arrayKey])) {
+            return data[arrayKey];
+    }
+
+        // 包含在 result 中
+        if (data.result) {
+            if (Array.isArray(data.result)) {
+                return data.result;
+            }
+            if (arrayKey && data.result[arrayKey] && Array.isArray(data.result[arrayKey])) {
+                return data.result[arrayKey];
+            }
+        }
+
+        // 包含在 data 中
+        if (data.data) {
+            if (Array.isArray(data.data)) {
+                return data.data;
+            }
+            if (arrayKey && data.data[arrayKey] && Array.isArray(data.data[arrayKey])) {
+                return data.data[arrayKey];
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * 从用户数据中提取标准化的用户对象
+     * @param {Object} userData - 用户数据（可能包含嵌套结构或扁平结构）
+     * @returns {Object|null} 标准化的用户对象，失败时返回 null
+     * @private
+     */
+    _extractUserObject(userData) {
+        if (!userData) {
+            return null;
+        }
+
+        let user = null;
+        let isFlatFormat = false;
+
+        // 优先检查嵌套格式（Twitter API 标准格式）
+        // 嵌套格式的特征：有 rest_id 和 legacy 字段
+        if (userData.rest_id && userData.legacy) {
+            user = userData;
+        }
+        // 包含在 result 中
+        else if (userData.result?.rest_id && userData.result?.legacy) {
+            user = userData.result;
+        }
+        // 包含在 data.user.result 中
+        else if (userData.data?.user?.result?.rest_id && userData.data?.user?.result?.legacy) {
+            user = userData.data.user.result;
+        }
+        // 检查是否是扁平格式（只有当不是嵌套格式时才判断）
+        // 扁平格式的特征：有 screen_name 字段（因为 id 可能存在于嵌套格式中）
+        else if (userData.screen_name) {
+            // 扁平格式：直接使用 userData
+            user = userData;
+            isFlatFormat = true;
+        }
+        // 检查 result 中是否包含扁平格式
+        else if (userData.result?.screen_name) {
+            user = userData.result;
+            isFlatFormat = true;
+        }
+
+        if (!user) {
+            return null;
+        }
+
+        // 处理扁平格式（/get-users-v2 API）
+        if (isFlatFormat) {
+            const userId = user.id || user.id_str || '';
+            const screenName = user.screen_name || '';
+            const name = user.name || '';
+
+            if (!userId || !screenName) {
+                logger.debug(`扁平格式用户数据缺少必要字段: id=${userId}, screen_name=${screenName}`);
+                return null;
+            }
+
+            return {
+                id: String(userId),
+                username: screenName,              // @ 用户名
+                screen_name: screenName,            // @ 用户名（与 username 相同）
+                name: name,                         // 显示名称
+                description: user.description || '',
+                followers_count: user.followers_count || 0,
+                following_count: user.friends_count || user.following_count || 0,
+                tweet_count: user.statuses_count || user.tweet_count || 0,
+                profile_image_url: user.profile_image_url || user.profile_image_url_https || '',
+                is_following: false,
+                is_tracked: false
+            };
+        }
+
+        // 处理嵌套格式（Twitter API 标准格式）
+        if (!user.legacy) {
+            return null;
+        }
+
+        // 返回标准化的用户数据
+        return {
+            id: user.rest_id,
+            username: user.legacy.screen_name,      // @ 用户名
+            screen_name: user.legacy.screen_name,   // @ 用户名（与 username 相同）
+            name: user.legacy.name,                 // 显示名称
+            description: user.legacy.description || '',
+            followers_count: user.legacy.followers_count || 0,
+            following_count: user.legacy.friends_count || 0,
+            tweet_count: user.legacy.statuses_count || 0,
+            profile_image_url: user.legacy.profile_image_url_https || '',
+            is_following: false,
+            is_tracked: false
+        };
+    }
+
+    /**
+     * 记录 API 错误信息
+     * @param {Error} error - 错误对象
+     * @param {string} context - 错误上下文描述
+     * @private
+     */
+    logApiError(error, context) {
+        if (error.response) {
+            logger.error(`${context}: HTTP ${error.response.status} - ${error.response.statusText}`);
+            logger.error(`响应数据: ${JSON.stringify(error.response.data).substring(0, 500)}`);
+        } else if (error.request) {
+            logger.error(`${context}: 无响应 - ${error.message}`);
+        } else {
+            logger.error(`${context}: ${error.message}`);
+        }
+    }
+
+    // ==================== 用户信息获取 ====================
+
+    /**
+     * 通过用户名获取单个用户信息
+     * @param {string} username - 用户名（如 'elonmusk'）
+     * @returns {Promise<Object|null>} 用户信息对象，失败时返回 null
      */
     async getUserByUsername(username) {
         try {
@@ -95,21 +252,67 @@ class TwitterPoller {
             });
 
             // 验证响应数据结构
-            if (!userResponse.data?.result?.data?.user?.result) {
-                logger.error(`找不到用户 ${username}，API返回数据格式不符合预期`);
+            if (!userResponse.data) {
+                logger.error(`找不到用户 ${username}，API返回数据为空`);
                 return null;
             }
 
-            const userData = userResponse.data.result.data.user.result;
+            // 根据实际API返回结构提取用户数据
+            // API返回格式: {user: {result: {rest_id, legacy: {...}}}}
+            let userData = null;
+            const responseData = userResponse.data;
 
-            // 提取需要的用户信息
-            const userInfo = {
-                id: userData.rest_id,
-                username: userData.legacy.name,
-                screen_name: userData.legacy.screen_name
-            };
+            // 路径1: user.result (RapidAPI /user 端点返回的格式)
+            if (responseData.user?.result) {
+                userData = responseData.user.result;
+                logger.debug(`使用路径: user.result`);
+            }
+            // 路径2: result.data.user.result (其他可能的嵌套格式)
+            else if (responseData.result?.data?.user?.result) {
+                userData = responseData.result.data.user.result;
+                logger.debug(`使用路径: result.data.user.result`);
+            }
+            // 路径3: result.result
+            else if (responseData.result?.result) {
+                userData = responseData.result.result;
+                logger.debug(`使用路径: result.result`);
+            }
+            // 路径4: result
+            else if (responseData.result) {
+                userData = responseData.result;
+                logger.debug(`使用路径: result`);
+            }
+            // 路径5: data.user.result
+            else if (responseData.data?.user?.result) {
+                userData = responseData.data.user.result;
+                logger.debug(`使用路径: data.user.result`);
+            }
+            // 路径6: data
+            else if (responseData.data) {
+                userData = responseData.data;
+                logger.debug(`使用路径: data`);
+            }
+            // 路径7: 直接是用户对象（扁平格式）
+            else if (responseData.id || responseData.id_str || responseData.rest_id) {
+                userData = responseData;
+                logger.debug(`使用路径: 根对象`);
+            }
 
-            logger.info(`成功获取用户信息: ${userInfo.username} (@${userInfo.screen_name}), ID: ${userInfo.id}`);
+            if (!userData) {
+                logger.error(`找不到用户 ${username}，API返回数据格式不符合预期`);
+                logger.debug(`API响应结构: ${JSON.stringify(responseData).substring(0, 1000)}`);
+                return null;
+            }
+
+            // 使用统一的用户提取方法
+            const userInfo = this._extractUserObject(userData);
+            if (!userInfo) {
+                logger.error(`无法从API响应中提取用户 ${username} 的信息`);
+                logger.debug(`用户数据: ${JSON.stringify(userData).substring(0, 500)}`);
+                return null;
+            }
+
+            logger.info(`成功获取用户信息: ${userInfo.name} (@${userInfo.username}), ID: ${userInfo.id}`);
             return userInfo;
         } catch (error) {
             this.logApiError(error, `获取用户 ${username} 信息时出错`);
@@ -117,11 +320,130 @@ class TwitterPoller {
         }
     }
 
+
+    /**
+     * 批量获取多个用户的详细信息
+     * @param {Array<string>} userIds - 用户ID数组
+     * @returns {Promise<Array>} 用户信息对象数组，失败时返回空数组
+     */
+    async getUsersByUserIds(userIds) {
+        try {
+            if (!userIds || userIds.length === 0) {
+                logger.warn('用户ID数组为空');
+                return [];
+            }
+
+            // 过滤无效的用户ID
+            const validUserIds = userIds
+                .filter(id => id && String(id).trim().length > 0)
+                .map(id => String(id).trim());
+
+            if (validUserIds.length === 0) {
+                logger.warn('过滤后没有有效的用户ID');
+                return [];
+            }
+
+            logger.info(`正在批量获取 ${validUserIds.length} 个用户的信息...`);
+
+            const usersResponse = await this.client.get(`/get-users`, {
+                params: { users: validUserIds.join(', ') }
+            });
+
+            if (!usersResponse.data) {
+                logger.error('API返回数据格式不符合预期');
+                return [];
+            }
+
+            // 根据实际API返回结构提取用户数组
+            // API返回格式: {result: {data: {users: [用户对象数组]}}}
+            let usersArray = [];
+            const responseData = usersResponse.data;
+
+            // 优先检查 result.data.users 字段（RapidAPI /get-users 端点返回的格式）
+            if (responseData.result?.data?.users && Array.isArray(responseData.result.data.users)) {
+                usersArray = responseData.result.data.users;
+                logger.debug(`从 result.data.users 字段提取到 ${usersArray.length} 个用户`);
+            }
+            // 备用路径1: result.users
+            else if (responseData.result?.users && Array.isArray(responseData.result.users)) {
+                usersArray = responseData.result.users;
+                logger.debug(`从 result.users 字段提取到 ${usersArray.length} 个用户`);
+            }
+            // 备用路径2: data.users
+            else if (responseData.data?.users && Array.isArray(responseData.data.users)) {
+                usersArray = responseData.data.users;
+                logger.debug(`从 data.users 字段提取到 ${usersArray.length} 个用户`);
+            }
+            // 备用路径3: 使用辅助方法尝试其他可能的路径
+            else {
+                usersArray = this._extractArrayFromResponse(responseData, 'users');
+            }
+
+            if (usersArray.length === 0) {
+                logger.warn(`无法从API响应中提取用户数组，可能这批用户ID无效或已被删除`);
+                logger.debug(`请求的用户ID: ${validUserIds.slice(0, 10).join(', ')}${validUserIds.length > 10 ? '...' : ''}`);
+                logger.debug(`API响应结构: ${JSON.stringify(responseData).substring(0, 500)}`);
+                return [];
+            }
+
+            // 使用辅助方法处理每个用户
+            // 注意：API返回的每个用户对象都包装在 {result: {...}} 中
+            const processedUsers = [];
+            for (const userWrapper of usersArray) {
+                // 提取 result 字段中的实际用户数据
+                const userData = userWrapper.result || userWrapper;
+                const user = this._extractUserObject(userData);
+                if (user) {
+                    processedUsers.push(user);
+                } else {
+                    // 提供更详细的调试信息
+                    const hasRestId = !!userData?.rest_id;
+                    const hasLegacy = !!userData?.legacy;
+                    const hasScreenName = !!userData?.screen_name;
+                    logger.warn(`无法解析用户数据 (rest_id: ${hasRestId}, legacy: ${hasLegacy}, screen_name: ${hasScreenName}): ${JSON.stringify(userData).substring(0, 200)}`);
+                }
+            }
+
+            logger.info(`成功获取到 ${processedUsers.length}/${validUserIds.length} 个用户的信息`);
+            return processedUsers;
+
+        } catch (error) {
+            // 如果是404错误，可能是部分用户ID无效
+            if (error.response?.status === 404) {
+                logger.warn(`批量获取用户信息时返回404，可能部分用户ID无效或账号已被删除/暂停`);
+                logger.debug(`请求的用户ID数量: ${userIds.length}`);
+
+                // 如果批次较大，尝试分成更小的批次重试
+                if (userIds.length > 10) {
+                    logger.info(`尝试将批次拆分为更小的批次重试...`);
+                    const halfSize = Math.floor(userIds.length / 2);
+                    const firstHalf = userIds.slice(0, halfSize);
+                    const secondHalf = userIds.slice(halfSize);
+
+                    // 递归调用，分别处理两半
+                    const [firstResults, secondResults] = await Promise.all([
+                        this.getUsersByUserIds(firstHalf),
+                        this.getUsersByUserIds(secondHalf)
+                    ]);
+
+                    const combinedResults = [...firstResults, ...secondResults];
+                    logger.info(`分批重试完成，共获取到 ${combinedResults.length}/${userIds.length} 个用户的信息`);
+                    return combinedResults;
+                }
+            } else {
+                this.logApiError(error, `批量获取用户信息时出错`);
+            }
+            return [];
+        }
+    }
+
+    // ==================== 推文获取 ====================
+
     /**
      * 获取指定用户的推文
      * @param {string} userId - 用户ID
-     * @param {string} username - 用户名称
-     * @param {string} screen_name - 用户屏幕名称
+     * @param {string} username - 用户名（@ 用户名）
+     * @param {string} screen_name - 屏幕名称（与 username 相同）
      * @returns {Promise<Array>} 推文对象数组，失败时返回空数组
      */
     async getUserTweets(userId, username, screen_name) {
@@ -188,55 +510,6 @@ class TwitterPoller {
         }
     }
 
-    /**
-     * 从TimelineEntry中提取推文数据
-     * @param {Object} entry - Timeline条目对象
-     * @returns {Object|null} 提取的推文数据，无效条目返回null
-     * @private
-     */
-    extractTweetFromEntry(entry) {
-        // 验证条目结构
-        if (!entry.content?.entryType || entry.content.entryType !== 'TimelineTimelineItem') {
-            return null;
-        }
-
-        if (!entry.content.itemContent?.itemType || entry.content.itemContent.itemType !== 'TimelineTweet') {
-            return null;
-        }
-
-        const tweetResults = entry.content.itemContent.tweet_results;
-        if (!tweetResults?.result) {
-            return null;
-        }
-
-        const tweet = tweetResults.result;
-
-        // 确保legacy属性存在
-        if (!tweet.legacy) {
-            logger.error(`推文 ${tweet.rest_id || 'unknown'} 缺少legacy属性`);
-            return null;
-        }
-
-        // 提取媒体URL (如果有)
-        let mediaUrls = [];
-        if (tweet.legacy.extended_entities?.media) {
-            mediaUrls = tweet.legacy.extended_entities.media.map(media => media.media_url_https);
-        }
-
-        // 返回规范化的推文数据
-        return {
-            id: tweet.rest_id,
-            text: tweet.legacy.full_text,
-            created_at: tweet.legacy.created_at,
-            retweet_count: tweet.legacy.retweet_count,
-            like_count: tweet.legacy.favorite_count,
-            reply_count: tweet.legacy.reply_count,
-            quote_count: tweet.legacy.quote_count,
-            bookmark_count: tweet.legacy.bookmark_count,
-            view_count: tweet.views ? tweet.views.count : 0,
-            media_urls: mediaUrls.join(',')
-        };
-    }
 
     /**
      * 获取Twitter列表的推文时间线
@@ -288,12 +561,12 @@ class TwitterPoller {
 
                     if (userInfo?.legacy) {
                         tweet.user_id = userInfo.rest_id;
-                        tweet.username = userInfo.legacy.name;
-                        tweet.screen_name = userInfo.legacy.screen_name;
+                        tweet.username = userInfo.legacy.screen_name;  // @ 用户名
+                        tweet.screen_name = userInfo.legacy.screen_name;  // @ 用户名（和 username 一样）
                     } else {
                         // 如果无法提取用户信息，使用占位符
                         tweet.user_id = 'unknown';
-                        tweet.username = 'Unknown User';
+                        tweet.username = 'unknown';
                         tweet.screen_name = 'unknown';
                     }
 
@@ -315,154 +588,210 @@ class TwitterPoller {
         }
     }
 
+    // ==================== 关注和粉丝列表获取 ====================
+
     /**
-     * 获取用户的关注列表（用户关注的人）
-     * @param {string} username - 目标用户名
-     * @param {string} cursor - 分页游标
-     * @returns {Promise<Object>} 包含关注列表和下一页游标的对象
+     * 获取用户的关注ID列表
+     * @param {string} username - 用户名（如 'mrbeast'）
+     * @param {number} count - 获取数量（默认500）
+     * @param {string|number} cursor - 分页游标（可选）
+     * @returns {Promise<Object>} {ids: Array<string>, nextCursor: string|null} 关注ID数组和下一页游标
      */
-    async getUserFollowings(username, cursor = null) {
+    async getUserFollowingIds(username, count = 500, cursor = null) {
         try {
-            logger.info(`正在获取用户 ${username} 的关注列表${cursor ? ' (使用游标: ' + cursor + ')' : ''}...`);
+            logger.info(`正在获取用户 ${username} 的关注ID列表 (数量: ${count})${cursor ? ', 游标: ' + cursor : ''}...`);
 
-            // 首先获取用户信息以获取user_id
-            let userId = null;
-
-            // 如果提供的是数字ID而不是用户名，直接使用
-            if (/^\d+$/.test(username)) {
-                userId = username;
-                logger.info(`使用提供的用户ID: ${userId}`);
-            } else {
-                // 否则获取用户信息来获取ID
-                const user = await this.getUserByUsername(username);
-                if (!user) {
-                    logger.error(`无法获取用户 ${username} 的信息`);
-                    return { followings: [], nextCursor: null };
-                }
-                userId = user.id;
-            }
-
-            // 构建请求参数
             const params = {
-                user: userId,
-                count: SPIDER_CONFIG.MAX_FOLLOWINGS_PER_REQUEST
+                username,
+                count: count.toString()
             };
 
             // 如果提供了游标，添加到请求中
             if (cursor) {
-                params.cursor = cursor;
+                params.cursor = cursor.toString();
             }
 
-            logger.info(`API请求参数: ${JSON.stringify(params)}`);
-            const followingsResponse = await this.client.get(`/followings`, { params });
+            const followingsResponse = await this.client.get(`/following-ids`, { params });
 
-            // 检查顶层的cursor对象
-            if (followingsResponse.data?.cursor) {
-                logger.info(`API响应中找到顶层cursor对象: ${JSON.stringify(followingsResponse.data.cursor)}`);
+            if (!followingsResponse.data) {
+                logger.error(`无法获取用户 ${username} 的关注ID列表`);
+                return { ids: [], nextCursor: null };
             }
 
-            // 验证响应数据结构
-            if (!followingsResponse.data?.result?.timeline?.instructions) {
-                logger.error(`无法获取用户 ${username} 的关注列表，API返回数据格式不符合预期`);
-                logger.error(`API响应: ${JSON.stringify(followingsResponse.data)}`);
+            // 提取ID数组
+            let followingIds = [];
+            if (followingsResponse.data.ids && Array.isArray(followingsResponse.data.ids)) {
+                followingIds = followingsResponse.data.ids;
+            } else {
+                followingIds = this._extractArrayFromResponse(followingsResponse.data, 'ids');
+            }
+
+            // 确保所有ID都是字符串格式并过滤无效值
+            followingIds = followingIds
+                .map(id => String(id))
+                .filter(id => id && id !== 'undefined' && id !== 'null');
+
+            // 提取下一页游标
+            let nextCursor = null;
+            if (followingsResponse.data.next_cursor_str) {
+                nextCursor = followingsResponse.data.next_cursor_str;
+            } else if (followingsResponse.data.next_cursor) {
+                nextCursor = String(followingsResponse.data.next_cursor);
+            }
+
+            // 如果游标为 "0" 或 0，表示没有更多页面
+            if (nextCursor === '0' || nextCursor === 'null') {
+                nextCursor = null;
+            }
+
+            logger.info(`成功获取到用户 ${username} 的 ${followingIds.length} 个关注ID${nextCursor ? ', 下一页游标: ' + nextCursor : ''}`);
+            return { ids: followingIds, nextCursor };
+
+        } catch (error) {
+            this.logApiError(error, `获取用户 ${username} 关注ID列表时出错`);
+            return { ids: [], nextCursor: null };
+        }
+    }
+
+
+
+    /**
+     * 获取用户的关注详细信息（先获取关注ID列表，再批量获取完整用户信息）
+     * @param {string} username - 用户名或用户ID
+     * @param {string|number} cursor - 分页游标（可选）
+     * @returns {Promise<Object>} {followings: Array, nextCursor: string|null} 关注用户详细信息数组和下一页游标
+     */
+    async getUserFollowingWithDetails(username, cursor = null) {
+        try {
+            logger.info(`正在获取用户 ${username} 的关注详细信息${cursor ? ' (使用游标: ' + cursor + ')' : ''}...`);
+
+            // 第一步：获取关注ID列表
+            const result = await this.getUserFollowingIds(username, SPIDER_CONFIG.MAX_FOLLOWINGS_PER_REQUEST, cursor);
+            const userIds = result.ids;
+            const nextCursor = result.nextCursor;
+
+            if (userIds.length === 0) {
+                logger.warn(`用户 ${username} 没有获取到关注用户ID`);
                 return { followings: [], nextCursor: null };
             }
 
-            const followings = [];
-            // 设置下一页游标 - 优先从顶层的cursor对象中获取
-            let nextCursor = null;
+            logger.info(`获取到 ${userIds.length} 个关注用户ID，开始批量获取详细信息...`);
 
-            if (followingsResponse.data.cursor && followingsResponse.data.cursor.bottom) {
-                const bottomCursor = followingsResponse.data.cursor.bottom;
-                logger.info(`从顶层cursor对象中找到底部游标: ${bottomCursor}`);
+            // 第二步：批量获取完整用户信息
+            // 调整批次大小为50，避免单次请求过多用户导致404
+            const batchSize = 50;
+            const allFollowings = [];
 
-                // 解析游标值 - 如果以"0|"开头表示最后一页
-                const cursorParts = bottomCursor.split('|');
-                if (cursorParts.length > 1 && cursorParts[0] === '0') {
-                    logger.info(`底部游标 "${bottomCursor}" 以"0|"开头，表示没有更多页面`);
-                    nextCursor = null;
+            for (let i = 0; i < userIds.length; i += batchSize) {
+                const batch = userIds.slice(i, i + batchSize);
+                const batchNumber = Math.floor(i / batchSize) + 1;
+                const totalBatches = Math.ceil(userIds.length / batchSize);
+
+                logger.info(`正在获取第 ${batchNumber}/${totalBatches} 批关注用户信息 (${batch.length} 个用户)...`);
+
+                const batchUsers = await this.getUsersByUserIds(batch);
+                if (batchUsers.length > 0) {
+                    allFollowings.push(...batchUsers);
                 } else {
-                    nextCursor = bottomCursor;
-                    logger.info(`使用底部游标作为下一页游标: ${nextCursor}`);
+                    logger.warn(`第 ${batchNumber} 批未获取到任何用户信息`);
                 }
-            } else {
-                logger.info(`API响应中没有找到顶层cursor对象或bottom游标`);
-            }
 
-            // 提取关注列表信息
-            // 寻找TimelineAddEntries指令
-            const addEntriesInstruction = followingsResponse.data.result.timeline.instructions.find(
-                instruction => instruction.type === 'TimelineAddEntries'
-            );
-
-            if (addEntriesInstruction && addEntriesInstruction.entries) {
-                // 处理每个条目
-                for (const entry of addEntriesInstruction.entries) {
-                    // 跳过游标条目
-                    if (entry.entryId && entry.entryId.startsWith('cursor-')) {
-                        continue;
-                    }
-
-                    // 提取用户信息
-                    const following = this.extractUserFromFollowingEntry(entry);
-                    if (following) {
-                        followings.push(following);
-                    }
+                // 添加延迟以避免API限流，增加到1秒
+                if (i + batchSize < userIds.length) {
+                    await this.sleep(1000);
                 }
             }
 
-            logger.info(`成功获取到 ${followings.length} 个 ${username} 正在关注的用户, 下一页游标: ${nextCursor || '无'}`);
-            return { followings, nextCursor };
+            logger.info(`成功获取到用户 ${username} 的 ${allFollowings.length}/${userIds.length} 个关注用户的详细信息`);
+            return { followings: allFollowings, nextCursor };
+
         } catch (error) {
-            this.logApiError(error, `获取用户 ${username} 关注列表时出错`);
+            this.logApiError(error, `获取用户 ${username} 关注详细信息时出错`);
             return { followings: [], nextCursor: null };
         }
     }
 
+
+
+    // ==================== 数据提取辅助方法 ====================
+
     /**
-     * 从关注列表条目中提取用户信息
-     * @param {Object} entry - 关注列表条目对象
-     * @returns {Object|null} 提取的用户数据，无效条目返回null
+     * 从 Timeline Entry 中提取推文数据
+     * @param {Object} entry - Timeline 条目对象
+     * @returns {Object|null} 规范化的推文数据，无效条目返回 null
      * @private
      */
-    extractUserFromFollowingEntry(entry) {
-        if (!entry.content || !entry.content.itemContent || entry.content.itemContent.itemType !== 'TimelineUser') {
+    extractTweetFromEntry(entry) {
+        // 验证条目结构
+        if (!entry.content?.entryType || entry.content.entryType !== 'TimelineTimelineItem') {
             return null;
         }
 
-        const userResults = entry.content.itemContent.user_results;
-        if (!userResults || !userResults.result) {
+        if (!entry.content.itemContent?.itemType || entry.content.itemContent.itemType !== 'TimelineTweet') {
             return null;
         }
 
-        const user = userResults.result;
+        const tweetResults = entry.content.itemContent.tweet_results;
+        if (!tweetResults?.result) {
+            return null;
+        }
+
+        const tweet = tweetResults.result;
 
         // 确保legacy属性存在
-        if (!user.legacy) {
-            logger.error(`用户 ${user.rest_id || 'unknown'} 缺少legacy属性`);
+        if (!tweet.legacy) {
+            logger.error(`推文 ${tweet.rest_id || 'unknown'} 缺少legacy属性`);
             return null;
         }
 
-        // 返回规范化的用户数据
+        // 提取媒体URL (如果有)
+        let mediaUrls = [];
+        if (tweet.legacy.extended_entities?.media) {
+            mediaUrls = tweet.legacy.extended_entities.media.map(media => media.media_url_https);
+        }
+
+        // 返回规范化的推文数据
         return {
-            id: user.rest_id,
-            username: user.legacy.name,
-            screen_name: user.legacy.screen_name,
-            name: user.legacy.name,
-            description: user.legacy.description,
-            followers_count: user.legacy.followers_count,
-            following_count: user.legacy.friends_count,
-            tweet_count: user.legacy.statuses_count,
-            profile_image_url: user.legacy.profile_image_url_https,
-            is_following: false // 这不是关注者，而是被关注的用户
+            id: tweet.rest_id,
+            text: tweet.legacy.full_text,
+            created_at: tweet.legacy.created_at,
+            retweet_count: tweet.legacy.retweet_count,
+            like_count: tweet.legacy.favorite_count,
+            reply_count: tweet.legacy.reply_count,
+            quote_count: tweet.legacy.quote_count,
+            bookmark_count: tweet.legacy.bookmark_count,
+            view_count: tweet.views ? tweet.views.count : 0,
+            media_urls: mediaUrls.join(',')
         };
     }
 
     /**
-     * 获取并存储指定用户关注的所有用户
+     * 从关注列表条目中提取用户信息
+     * @param {Object} entry - 关注列表 Timeline 条目对象
+     * @returns {Object|null} 规范化的用户数据，无效条目返回 null
+     * @private
+     */
+    extractUserFromFollowingEntry(entry) {
+        if (!entry.content?.itemContent || entry.content.itemContent.itemType !== 'TimelineUser') {
+            return null;
+        }
+
+        const userResults = entry.content.itemContent.user_results;
+        if (!userResults?.result) {
+            return null;
+        }
+
+        // 使用统一的用户提取方法
+        return this._extractUserObject(userResults.result);
+    }
+
+    // ==================== 批量操作和定时任务 ====================
+
+    /**
+     * 获取并存储指定用户关注的所有用户（支持分页）
      * @param {string} username - 目标用户名
-     * @param {string} startCursor - 起始游标
-     * @returns {Promise<Object>} 统计信息
+     * @param {string} startCursor - 起始游标（可选）
+     * @returns {Promise<Object>} 包含统计信息的对象
      */
     async fetchAndStoreAllFollowings(username, startCursor = null) {
         const stats = {
@@ -546,8 +875,8 @@ class TwitterPoller {
                     lastCursor = nextCursor;
                 }
 
-                // 获取一页关注列表
-                const result = await this.getUserFollowings(username, nextCursor);
+                // 获取一页关注列表（使用详细信息方法）
+                const result = await this.getUserFollowingWithDetails(username, nextCursor);
                 const followings = result.followings;
                 const newCursor = result.nextCursor;
 
@@ -669,8 +998,10 @@ class TwitterPoller {
             } else if (typeof user === 'object' && user.id) {
                 // 传入的是数据库用户对象
                 userId = user.id;
-                username = user.username || user.name;
-                screen_name = user.screen_name;
+                // username 和 screen_name 应该是一样的（都是 @ 用户名）
+                // 优先使用 screen_name，如果不存在则使用 username
+                screen_name = user.screen_name || user.username;
+                username = screen_name;  // 确保 username 和 screen_name 一致
             } else {
                 logger.error(`无效的用户参数: ${JSON.stringify(user)}`);
                 return 0;
@@ -1093,7 +1424,7 @@ function main() {
         }
 
         // 为其他命令创建需要API的采集器实例
-        const poller = new TwitterPoller();
+const poller = new TwitterPoller();
 
         // 处理获取关注列表的命令
         if (args.includes('--fetch-followings')) {
@@ -1237,16 +1568,16 @@ function main() {
             poller.pollAllUsers().then(() => {
                 logger.info('采集任务完成，退出程序');
                 poller.close();
-                process.exit(0);
-            }).catch(error => {
+        process.exit(0);
+    }).catch(error => {
                 logger.error('采集任务失败:', error);
                 poller.close();
-                process.exit(1);
-            });
-        } else {
+        process.exit(1);
+    });
+} else {
             // 正常模式：启动定时任务
             logger.info('以定时任务模式运行...');
-            poller.startPolling();
+    poller.startPolling();
 
             // 注册进程退出处理
             process.on('SIGINT', () => {

@@ -1,18 +1,33 @@
 /**
- * 配置文件
- * 包含系统常量、AI提示词和模型配置参数
+ * 系统配置文件
+ * 
+ * 包含：
+ * - 用户配置（默认账号等）
+ * - AI系统提示词（指导AI生成总结）
+ * - AI模型配置（模型选择和参数）
+ * 
+ * @module config
  */
 
+// ==================== 用户配置 ====================
+
 /**
- * 用户配置
- * @constant {string} FOLLOWER_SOURCE_ACCOUNT - 默认关注列表源账号
+ * 默认关注列表源账号
+ * @constant {string}
  */
 const FOLLOWER_SOURCE_ACCOUNT = "0xColinSu";
 
+// ==================== AI 系统提示词 ====================
+
 /**
- * AI系统提示词
- * 用于指导AI生成Twitter数据总结
- * @constant {string} SYSTEM_PROMPT - 传递给AI的系统指令
+ * AI 系统提示词
+ * 
+ * 用于指导 Gemini AI 生成 Twitter 数据总结，包含：
+ * - 分析步骤和重点（发射信号识别、代币追踪等）
+ * - 输出格式规范（HTML 结构）
+ * - 信息提取要求（来源引用、时间节点等）
+ * 
+ * @constant {string}
  */
 const SYSTEM_PROMPT = `
 目标：总结指定时间段内的Twitter推文内容，提取关键事件，识别涉及的代币或项目。**核心任务是洞察并详细阐述代币/项目的主要新闻或发展，其中，项目发射的预告、规则、时间及参与方式等信息为最关键的节点。在识别这些信息时，应优先关注和挖掘早期、微妙的"异常信号"（如暗示性预告、非主流渠道信息、核心成员的意向性发言等，区别于AI生成文案和日常噪音），力求捕捉具有行动价值的Alpha情报。** 输出需采用结构化HTML格式，使用简洁的样式。
@@ -96,20 +111,21 @@ const SYSTEM_PROMPT = `
 重要提示：请直接输出纯HTML内容，不要使用Markdown代码块（如\`\`\`html \`\`\`）包围你的回答。你的回复将直接被注入到网页中，所以应该只包含HTML内容本身。请使用列表而不是表格来展示信息，并确保良好的缩进结构。**"发射专项解读"部分的显示逻辑应基于"最新动态与核心事件"中是否提及了任何与发射相关的明确信息或有价值的早期信号。**
 `;
 
-/**
- * AI模型配置
- * @constant {Object} AI_CONFIG - AI模型配置参数
- * @property {string} model - Gemini模型名称
- * @property {number} temperature - 生成温度（创造性与确定性平衡）
- */
-const AI_CONFIG = {
-  model: "gemini-2.0-flash", // 使用Gemini 2.0 Flash模型
-  temperature: 0.7           // 0.7的温度提供良好的创造性平衡
-};
+// ==================== AI 模型配置 ====================
 
 /**
- * 导出模块中的常量
+ * AI 模型配置参数
+ * @constant {Object}
+ * @property {string} model - Gemini 模型名称
+ * @property {number} temperature - 生成温度（0-1，越高越有创造性）
  */
+const AI_CONFIG = {
+  model: "gemini-2.0-flash",  // Gemini 2.0 Flash 模型（快速且高效）
+  temperature: 0.7            // 平衡创造性和准确性
+};
+
+// ==================== 模块导出 ====================
+
 module.exports = {
   FOLLOWER_SOURCE_ACCOUNT,
   SYSTEM_PROMPT,
