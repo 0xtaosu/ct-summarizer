@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const schedule = require('node-schedule');
 const OpenAI = require('openai');
+const TelegramBot = require('node-telegram-bot-api');
 
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
@@ -200,6 +201,7 @@ class TwitterSummarizer {
     constructor() {
         this._initializeAIClient();
         this._initializeDatabase();
+        this._initializeTelegramBot();
         this.throttler = new RequestThrottler(1);
         this.lastSummaryTime = {
             '1hour': new Date(),
@@ -252,30 +254,47 @@ class TwitterSummarizer {
         }
     }
 
+    /**
+     * 初始化 Telegram Bot（可选）
+     * @private
+     */
+    _initializeTelegramBot() {
+        const token = process.env.TELEGRAM_BOT_TOKEN;
+        const chatId = process.env.TELEGRAM_CHAT_ID;
+
+        if (token && chatId) {
+            this.telegramBot = new TelegramBot(token, { polling: false });
+            this.telegramChatId = chatId;
+            logger.info('Telegram Bot 已初始化，将在生成总结后推送');
+        } else {
+            logger.warn('未配置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，跳过 Telegram 推送');
+            this.telegramBot = null;
+            this.telegramChatId = null;
+        }
+    }
+
     // ==================== 定时任务调度 ====================
 
     /**
      * 设置定时任务（使用 node-schedule）
      */
     scheduleJobs() {
-        // 不再在启动时生成所有时间段的总结
-
         // 每小时在x:10分时生成1小时总结（例如1:10, 2:10, 3:10...）
         schedule.scheduleJob('10 * * * *', async () => {
             logger.info('执行定时任务: 生成1小时总结');
-            await this.generateAndSaveSummary('1hour');
+            await this.generateAndSaveSummary('1hour', { trigger: 'cron' });
         });
 
         // 每12小时在x:10分时生成12小时总结 (每天0:10和12:10)
         schedule.scheduleJob('10 0,12 * * *', async () => {
             logger.info('执行定时任务: 生成12小时总结');
-            await this.generateAndSaveSummary('12hours');
+            await this.generateAndSaveSummary('12hours', { trigger: 'cron' });
         });
 
         // 每24小时在0:10生成1天总结 (每天0:10)
         schedule.scheduleJob('10 0 * * *', async () => {
             logger.info('执行定时任务: 生成1天总结');
-            await this.generateAndSaveSummary('1day');
+            await this.generateAndSaveSummary('1day', { trigger: 'cron' });
         });
 
         logger.info('已设置定时总结任务');
@@ -288,12 +307,14 @@ class TwitterSummarizer {
      * @param {string} period - 时间段标识
      * @returns {Promise<Object|null>} 总结对象或 null
      */
-    async generateAndSaveSummary(period) {
+    async generateAndSaveSummary(period, options = {}) {
         const canProceed = await this.throttler.acquireRequest();
         if (!canProceed) {
             logger.warn(`自动总结被拒绝：当前有其他总结正在进行中`);
             return null;
         }
+
+        const trigger = options.trigger || 'auto';
 
         try {
             logger.info(`开始自动生成${period}总结...`);
@@ -332,6 +353,13 @@ class TwitterSummarizer {
                 tweets.length,
                 'success'
             );
+
+            // 推送到 Telegram（若已配置）
+            try {
+                await this._sendTelegramSummary(period, timeRange.beijingTimeRange, cleanedSummary, tweets.length, trigger);
+            } catch (tgErr) {
+                logger.warn(`Telegram 推送失败: ${tgErr.message}`);
+            }
 
             logger.info(`${period}总结已成功生成并保存到数据库 (ID: ${result.id})`);
             return result;
@@ -419,6 +447,75 @@ class TwitterSummarizer {
     }
 
     /**
+     * 将HTML总结格式化为适合Telegram的文本（保留链接，去除列表标签）
+     * @param {string} content
+     * @returns {string}
+     * @private
+     */
+    _formatSummaryForTelegram(content) {
+        if (!content || typeof content !== 'string') return '';
+
+        let text = content;
+
+        // 去掉代码块和样式脚本
+        text = text.replace(/```[\s\S]*?```/g, '');
+        text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
+        text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
+
+        // 将列表转换为简单行文本
+        text = text.replace(/<ol[^>]*>/gi, '');
+        text = text.replace(/<\/ol>/gi, '');
+        text = text.replace(/<li[^>]*>/gi, '\n• ');
+        text = text.replace(/<\/li>/gi, '');
+
+        // 保留链接但去掉无用换行
+        text = text.replace(/<br\s*\/?>/gi, '\n');
+
+        // 其他标签简单移除
+        text = text.replace(/<\/?(div|span|p)>/gi, '\n');
+        text = text.replace(/&nbsp;/g, ' ');
+
+        return text.trim();
+    }
+
+    /**
+     * 将总结推送到Telegram
+     * @param {string} period
+     * @param {string} timeRange
+     * @param {string} summaryHtml
+     * @param {number} tweetCount
+     * @param {string} trigger - 来源标记（startup/cron/manual/auto）
+     * @private
+     */
+    async _sendTelegramSummary(period, timeRange, summaryHtml, tweetCount, trigger = 'auto') {
+        if (!this.telegramBot || !this.telegramChatId) return;
+        // 仅推送1小时总结
+        if (period !== '1hour') return;
+
+        const triggerLabelMap = {
+            startup: '启动',
+            cron: '定时',
+            manual: '手动',
+            auto: '自动'
+        };
+        const label = triggerLabelMap[trigger] || trigger;
+
+        const header = `<b>1小时总结</b> (${timeRange} 北京时间, ${label})\n数据量: ${tweetCount || 0} 条`;
+        const body = this._formatSummaryForTelegram(summaryHtml);
+        let message = `${header}\n${body}`;
+
+        // Telegram消息长度上限约4096字符，预留余量
+        if (message.length > 3900) {
+            message = message.slice(0, 3900) + '\n...（内容过长已截断）';
+        }
+
+        await this.telegramBot.sendMessage(this.telegramChatId, message, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: false
+        });
+    }
+
+    /**
      * 输出推文结果日志
      * @param {Array} tweets - 推文数组
      * @param {string} period - 时间段
@@ -482,12 +579,11 @@ class TwitterSummarizer {
             // 使用北京时间范围
             const timeRangeStr = `${timeRange.beijingStart} 到 ${timeRange.beijingEnd} (北京时间)`;
 
-            const userPrompt = `请扮演“总结大师”，基于以下推文生成10条中文要点：
-1) 每条以 "1."、"2."... "10." 开头
-2) 聚焦事件与结论，突出数字/影响/动作，避免客套
-3) 如有来源链接，在末尾追加 [01](源链接)，多来源累加 [02][03]...
-4) 优先写出发射/空投/IDO等信号（规则、时间、参与方式），再写合作/技术/市场动向
-5) 输出紧凑的纯文本列表（不要HTML/表格/代码块）
+            const userPrompt = `请扮演“总结大师”，用HTML生成10条中文要点，方便嵌入网页/Tg：
+- 使用<ol><li>…</li></ol>有序列表；不要输出代码块或表格
+- 聚焦事件/结论，突出数字/影响/动作，避免客套
+- 优先写发射/空投/IDO等信号（规则、时间、参与方式），再写合作/技术/市场动向
+- 如有来源链接，在该条末尾追加 <a href="链接" target="_blank">[01]</a>，多来源累加 [02][03]…
 
 时间范围: ${timeRangeStr}
 
@@ -651,6 +747,13 @@ ${tweetsText}`;
         try {
             // 初始化所有服务
             await this._initializeServices();
+
+            // 启动时生成一次1小时总结并推送
+            try {
+                await this.generateAndSaveSummary('1hour', { trigger: 'startup' });
+            } catch (err) {
+                logger.warn(`启动时生成1小时总结失败: ${err.message}`);
+            }
         } catch (error) {
             logger.error('系统启动失败:', error);
             throw error;
@@ -843,7 +946,7 @@ function _setupRoutes(app, summarizer) {
 
         try {
             logger.info(`接收到Web请求：手动生成${period}总结`);
-            const result = await summarizer.generateAndSaveSummary(period);
+            const result = await summarizer.generateAndSaveSummary(period, { trigger: 'manual' });
 
             if (!result) {
                 return res.status(500).json({ error: '生成总结失败' });
