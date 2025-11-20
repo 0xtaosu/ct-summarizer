@@ -3,7 +3,7 @@
  * 
  * 核心功能：
  * - 定时从 SQLite 数据库读取 Twitter 推文数据
- * - 使用 Gemini AI 模型生成智能分析总结
+ * - 使用 xAI Grok 模型生成智能分析总结
  * - 将生成的总结存储到数据库
  * - 提供 Web API 和界面展示总结结果
  * - 支持多时间段总结（1小时、12小时、24小时）
@@ -18,7 +18,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const schedule = require('node-schedule');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const OpenAI = require('openai');
 
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
@@ -215,21 +215,22 @@ class TwitterSummarizer {
      */
     _initializeAIClient() {
         // 获取API密钥
-        const geminiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+        const xaiKey = process.env.XAI_API_KEY;
 
-        // 检查是否有Gemini API密钥
-        if (!geminiKey) {
-            throw new Error("未找到 GOOGLE_API_KEY 或 GEMINI_API_KEY 环境变量，请在 .env 文件中设置");
+        if (!xaiKey) {
+            throw new Error("未找到 XAI_API_KEY 环境变量，请在 .env 文件中设置");
         }
 
-        logger.info('使用Gemini API初始化客户端');
+        logger.info('使用 xAI 客户端初始化...');
 
-        this.geminiApiKey = geminiKey;
-        this.geminiModel = AI_CONFIG.model;
-        this.genAI = new GoogleGenerativeAI(this.geminiApiKey);
-        this.genModel = this.genAI.getGenerativeModel({ model: this.geminiModel });
+        this.xaiModel = AI_CONFIG.model;
+        this.xaiClient = new OpenAI({
+            apiKey: xaiKey,
+            baseURL: 'https://api.x.ai/v1',
+            timeout: 360000
+        });
 
-        logger.info(`AI客户端初始化成功，使用模型: ${this.geminiModel}`);
+        logger.info(`AI客户端初始化成功，使用模型: ${this.xaiModel}`);
     }
 
     /**
@@ -551,21 +552,20 @@ class TwitterSummarizer {
                     await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
                 }
 
-                logger.info(`使用Gemini模型发送HTTP请求...`);
+                logger.info(`使用 xAI Grok 模型发送HTTP请求...`);
 
-                const response = await this.genModel.generateContent({
-                    contents: [
-                        { role: "user", parts: [{ text: `${SYSTEM_PROMPT}\n\n${userPrompt}` }] }
+                const response = await this.xaiClient.chat.completions.create({
+                    model: this.xaiModel,
+                    messages: [
+                        { role: 'system', content: SYSTEM_PROMPT },
+                        { role: 'user', content: userPrompt }
                     ],
-                    generationConfig: {
-                        temperature: AI_CONFIG.temperature,
-                        maxOutputTokens: 4000,
-                    }
+                    temperature: AI_CONFIG.temperature
                 });
 
-                const text = response?.response?.text?.();
+                const text = response?.choices?.[0]?.message?.content;
                 if (!text) {
-                    throw new Error('Gemini API返回空响应');
+                    throw new Error('xAI API返回空响应');
                 }
 
                 return text;

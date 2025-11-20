@@ -7,9 +7,7 @@
     "start": "node index.js",
     "start:spider": "node spider.js",
     "logs:clean": "rm -f ./logs/*.log",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "test:gemini": "node test-gemini.js",
-    "test:gemini-http": "node test-gemini-http.js"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
     "twitter",
@@ -23,7 +21,6 @@
     "csv-writer": "^1.6.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "@google/generative-ai": "^0.11.0",
     "node-schedule": "^2.1.1",
     "node-telegram-bot-api": "^0.63.0",
     "openai": "^4.20.0",

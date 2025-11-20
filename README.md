@@ -23,7 +23,7 @@
      - 每12小时（0:10和12:10）生成12小时报告（基于前12个整点小时的数据） 
      - 每24小时（0:10）生成24小时报告（基于前24个整点小时的数据）
      - 系统启动时立即生成所有时间段的总结
-   - 使用 Google Gemini API 生成智能摘要
+   - 使用 xAI Grok API 生成智能摘要
    - 提供简洁美观的 Web 界面展示摘要
    - 支持不同时间段（整点小时、12小时、24小时）的总结查看
    - 提供历史报告时间线列表，按时间段和日期分类
@@ -73,13 +73,13 @@
 4. 修改配置文件 `.env`，填入必要的 API 密钥：
    ```
    RAPIDAPI_KEY=your_rapidapi_key_here
-   GOOGLE_API_KEY=your_gemini_api_key_here   # 或使用 GEMINI_API_KEY
+   XAI_API_KEY=your_grok_api_key_here
    PORT=5001  # 可选，默认为 5000
    ```
    
    **获取 API 密钥：**
    - **RapidAPI Key**: 访问 [RapidAPI Twitter241](https://rapidapi.com/rphrp1985/api/twitter241) 注册并订阅以获取密钥
-   - **Gemini API Key**: 访问 [Google AI Studio](https://ai.google.dev/) 获取免费的 Gemini API 密钥（支持 Gemini 2.5 Flash）
+   - **Grok API Key**: 登录 x.ai 账户获取 Grok API Key
 
 ### 配置 Twitter 列表ID
 

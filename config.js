@@ -133,12 +133,12 @@ const SYSTEM_PROMPT = `
 /**
  * AI 模型配置参数
  * @constant {Object}
- * @property {string} model - Gemini 模型名称
+ * @property {string} model - 模型名称
  * @property {number} temperature - 生成温度（0-1，越高越有创造性）
  */
 const AI_CONFIG = {
-  model: "gemini-2.5-flash",  // Gemini 2.5 Flash 模型
-  temperature: 0.5           // 平衡创造性和准确性
+  model: "grok-4",  // xAI Grok 模型
+  temperature: 0.7           // 平衡创造性和准确性
 };
 
 // ==================== 模块导出 ====================
