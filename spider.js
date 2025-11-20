@@ -1134,6 +1134,47 @@ class TwitterPoller {
     }
 
     /**
+     * 获取并保存单个Twitter列表的推文
+     * @param {string} listId - Twitter列表ID
+     * @param {number} count - 获取推文数量
+     * @returns {Promise<Object>} 单个列表的处理结果
+     */
+    async pollList(listId, count = SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST) {
+        const result = {
+            listId,
+            success: false,
+            tweetsCount: 0,
+            newTweets: 0,
+            updatedTweets: 0,
+            error: null
+        };
+
+        try {
+            const tweets = await this.getListTimeline(listId, count);
+
+            if (tweets.length === 0) {
+                logger.warn(`列表 ${listId} 未获取到推文`);
+                result.success = true;
+                return result;
+            }
+
+            const saveStats = await this.dbManager.saveTweetsToDatabase(tweets);
+            logger.info(`列表 ${listId} 推文保存完成: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
+
+            result.success = true;
+            result.tweetsCount = tweets.length;
+            result.newTweets = saveStats.new;
+            result.updatedTweets = saveStats.updated;
+
+            return result;
+        } catch (error) {
+            logger.error(`获取列表 ${listId} 的推文时出错: ${error.message}`);
+            result.error = error.message;
+            return result;
+        }
+    }
+
+    /**
      * 获取所有配置的Twitter列表推文
      * @param {string[]} [listIds=SPIDER_CONFIG.TWITTER_LIST_IDS] - 要拉取的列表ID
      * @returns {Promise<Object>} 统计信息
@@ -1158,35 +1199,16 @@ class TwitterPoller {
         logger.info(`开始拉取 ${targets.length} 个Twitter列表的推文...`);
 
         for (const listId of targets) {
-            try {
-                const tweets = await this.getListTimeline(listId, SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST);
+            const result = await this.pollList(listId, SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST);
 
-                let saveStats = { new: 0, updated: 0, skipped: 0 };
-                if (tweets.length > 0) {
-                    saveStats = await this.dbManager.saveTweetsToDatabase(tweets);
-                    logger.info(`列表 ${listId} 推文保存完成: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
-                } else {
-                    logger.warn(`列表 ${listId} 未获取到推文`);
-                }
-
-                runStats.totalTweets += tweets.length;
-                runStats.listsProcessed++;
-                runStats.listResults.push({
-                    listId,
-                    success: true,
-                    tweetsCount: tweets.length,
-                    newTweets: saveStats.new,
-                    updatedTweets: saveStats.updated
-                });
-            } catch (error) {
-                logger.error(`获取列表 ${listId} 的推文时出错: ${error.message}`);
+            if (!result.success) {
                 runStats.errors++;
-                runStats.listResults.push({
-                    listId,
-                    success: false,
-                    error: error.message
-                });
+            } else {
+                runStats.totalTweets += result.tweetsCount;
+                runStats.listsProcessed++;
             }
+
+            runStats.listResults.push(result);
         }
 
         runStats.endTime = new Date();
@@ -1597,9 +1619,16 @@ function main() {
                 : 100;
 
             // 获取列表推文
-            poller.getListTimeline(listId, count)
-                .then(async (tweets) => {
-                    if (tweets.length === 0) {
+            poller.pollList(listId, count)
+                .then((result) => {
+                    if (!result.success) {
+                        console.log(`\n获取失败: ${result.error || '未知错误'}`);
+                        poller.close();
+                        process.exit(1);
+                        return;
+                    }
+
+                    if (result.tweetsCount === 0) {
                         logger.warn(`列表 ${listId} 未获取到推文`);
                         console.log(`\n未获取到推文，列表ID: ${listId}`);
                         poller.close();
@@ -1607,17 +1636,10 @@ function main() {
                         return;
                     }
 
-                    logger.info(`成功获取到 ${tweets.length} 条推文`);
-                    console.log(`\n成功获取 ${tweets.length} 条推文！`);
-
-                    // 保存到数据库
-                    logger.info('正在保存推文到数据库...');
-                    const saveStats = await poller.dbManager.saveTweetsToDatabase(tweets);
-
-                    logger.info(`推文保存完成: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
-                    console.log(`- 新增: ${saveStats.new}`);
-                    console.log(`- 更新: ${saveStats.updated}`);
-                    console.log(`- 跳过: ${saveStats.skipped}`);
+                    logger.info(`成功获取到 ${result.tweetsCount} 条推文`);
+                    console.log(`\n成功获取 ${result.tweetsCount} 条推文！`);
+                    console.log(`- 新增: ${result.newTweets}`);
+                    console.log(`- 更新: ${result.updatedTweets}`);
 
                     poller.close();
                     process.exit(0);

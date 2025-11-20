@@ -137,8 +137,8 @@ const SYSTEM_PROMPT = `
  * @property {number} temperature - 生成温度（0-1，越高越有创造性）
  */
 const AI_CONFIG = {
-  model: "gemini-2.0-flash",  // Gemini 2.0 Flash 模型（快速且高效）
-  temperature: 0.7            // 平衡创造性和准确性
+  model: "gemini-2.5-flash",  // Gemini 2.5 Flash 模型
+  temperature: 0.5           // 平衡创造性和准确性
 };
 
 // ==================== 模块导出 ====================

@@ -17,8 +17,8 @@ require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 const schedule = require('node-schedule');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
@@ -215,19 +215,19 @@ class TwitterSummarizer {
      */
     _initializeAIClient() {
         // 获取API密钥
-        const geminiKey = process.env.GEMINI_API_KEY;
+        const geminiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
 
         // 检查是否有Gemini API密钥
         if (!geminiKey) {
-            throw new Error("未找到GEMINI_API_KEY环境变量，请在.env文件中设置");
+            throw new Error("未找到 GOOGLE_API_KEY 或 GEMINI_API_KEY 环境变量，请在 .env 文件中设置");
         }
 
-        logger.info('使用Gemini API初始化HTTP客户端');
+        logger.info('使用Gemini API初始化客户端');
 
-        // 使用axios创建HTTP客户端
         this.geminiApiKey = geminiKey;
-        this.geminiBaseUrl = "https://generativelanguage.googleapis.com/v1/models";
         this.geminiModel = AI_CONFIG.model;
+        this.genAI = new GoogleGenerativeAI(this.geminiApiKey);
+        this.genModel = this.genAI.getGenerativeModel({ model: this.geminiModel });
 
         logger.info(`AI客户端初始化成功，使用模型: ${this.geminiModel}`);
     }
@@ -553,11 +553,7 @@ class TwitterSummarizer {
 
                 logger.info(`使用Gemini模型发送HTTP请求...`);
 
-                // 构建请求URL
-                const url = `${this.geminiBaseUrl}/${this.geminiModel}:generateContent?key=${this.geminiApiKey}`;
-
-                // 构建请求体
-                const requestBody = {
+                const response = await this.genModel.generateContent({
                     contents: [
                         { role: "user", parts: [{ text: `${SYSTEM_PROMPT}\n\n${userPrompt}` }] }
                     ],
@@ -565,29 +561,14 @@ class TwitterSummarizer {
                         temperature: AI_CONFIG.temperature,
                         maxOutputTokens: 4000,
                     }
-                };
-
-                // 发送请求
-                const response = await axios.post(url, requestBody, {
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: timeoutMs
                 });
 
-                // 检查响应
-                if (!response || !response.data || !response.data.candidates || !response.data.candidates[0]) {
-                    logger.error('Gemini API返回数据无效');
+                const text = response?.response?.text?.();
+                if (!text) {
                     throw new Error('Gemini API返回空响应');
                 }
 
-                // 提取文本内容
-                const candidate = response.data.candidates[0];
-                if (!candidate.content || !candidate.content.parts || !candidate.content.parts[0]) {
-                    throw new Error('响应格式不符合预期');
-                }
-
-                return candidate.content.parts[0].text;
+                return text;
             } catch (retryError) {
                 lastError = retryError;
                 logger.error(`AI调用尝试 ${attempt + 1}/${maxRetries + 1} 失败:`, retryError.message);
@@ -930,6 +911,36 @@ function _formatSummaryResponse(summary) {
 // ==================== 系统入口 ====================
 
 /**
+ * 尝试监听端口，若被占用则依次递增尝试
+ * @param {express.Application} app
+ * @param {number} startPort
+ * @param {number} maxRetries
+ * @returns {Promise<{server: import('http').Server, port: number}>}
+ */
+function startServerWithFallback(app, startPort, maxRetries = 5) {
+    return new Promise((resolve, reject) => {
+        let port = startPort;
+        let attempts = 0;
+
+        const tryListen = () => {
+            const server = app.listen(port, () => resolve({ server, port }));
+            server.on('error', (err) => {
+                if (err.code === 'EADDRINUSE' && attempts < maxRetries) {
+                    logger.warn(`端口 ${port} 已被占用，尝试端口 ${port + 1}...`);
+                    port += 1;
+                    attempts += 1;
+                    setTimeout(tryListen, 100);
+                } else {
+                    reject(err);
+                }
+            });
+        };
+
+        tryListen();
+    });
+}
+
+/**
  * 系统主入口函数
  * 
  * 初始化并启动整个系统：
@@ -947,11 +958,10 @@ async function main() {
 
         const app = setupWebServer(summarizer);
 
-        const PORT = process.env.PORT || 5001;
-        const server = app.listen(PORT, () => {
-            logger.info(`服务器运行在端口 ${PORT}`);
-            logger.info(`访问 http://localhost:${PORT} 以使用Web界面`);
-        });
+        const desiredPort = Number(process.env.PORT) || 5001;
+        const { server, port: usedPort } = await startServerWithFallback(app, desiredPort);
+        logger.info(`服务器运行在端口 ${usedPort}`);
+        logger.info(`访问 http://localhost:${usedPort} 以使用Web界面`);
 
         // 设置服务器超时处理
         server.timeout = 300000; // 5分钟

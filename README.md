@@ -73,13 +73,13 @@
 4. 修改配置文件 `.env`，填入必要的 API 密钥：
    ```
    RAPIDAPI_KEY=your_rapidapi_key_here
-   GEMINI_API_KEY=your_gemini_api_key_here
+   GOOGLE_API_KEY=your_gemini_api_key_here   # 或使用 GEMINI_API_KEY
    PORT=5001  # 可选，默认为 5000
    ```
    
    **获取 API 密钥：**
    - **RapidAPI Key**: 访问 [RapidAPI Twitter241](https://rapidapi.com/rphrp1985/api/twitter241) 注册并订阅以获取密钥
-   - **Gemini API Key**: 访问 [Google AI Studio](https://ai.google.dev/) 获取免费的 Gemini API 密钥
+   - **Gemini API Key**: 访问 [Google AI Studio](https://ai.google.dev/) 获取免费的 Gemini API 密钥（支持 Gemini 2.5 Flash）
 
 ### 配置 Twitter 列表ID
 
@@ -101,7 +101,7 @@
 # 启动爬虫服务
 node spider.js
 
-# 启动 Web 服务
+# 启动 Web 服务（默认端口 5001，如被占用自动尝试下一个端口）
 node index.js
 ```
 
