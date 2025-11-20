@@ -12,7 +12,7 @@
 
 1. **数据采集服务 (spider.js)**
    - 通过 RapidAPI Twitter241 API 获取 Twitter/X 数据
-   - 自动定时从数据库中的用户获取最新推文
+   - 自动定时从配置的 Twitter 列表获取最新推文
    - 支持手动获取特定账号的关注者列表(支持分页获取大量关注)
    - 数据自动存储到 SQLite 数据库
    - 支持定时采集推文，默认每小时执行一次
@@ -81,6 +81,10 @@
    - **RapidAPI Key**: 访问 [RapidAPI Twitter241](https://rapidapi.com/rphrp1985/api/twitter241) 注册并订阅以获取密钥
    - **Gemini API Key**: 访问 [Google AI Studio](https://ai.google.dev/) 获取免费的 Gemini API 密钥
 
+### 配置 Twitter 列表ID
+
+编辑 `config.js` 中的 `TWITTER_LIST_IDS` 数组，填入需要定时轮询的列表ID（已提供10个示例ID）。爬虫服务启动和每小时定时任务都会按此列表拉取推文。
+
 ## 使用方法
 
 ### 启动系统
@@ -117,7 +121,7 @@ node index.js
 
 #### 数据采集服务 (spider.js)
 
-- 测试模式（获取所有用户的推文但不设置定时任务）：
+- 测试模式（立即获取所有配置列表的推文，不设置定时任务）：
   ```
   node spider.js --test
   ```
@@ -176,6 +180,11 @@ node index.js
   可选参数 `--count` 指定获取数量（默认100）：
   ```
   node spider.js --fetch-list --list-id 78468360 --count 50
+  ```
+
+- 手动获取数据库中所有用户的推文（按需）：
+  ```
+  node spider.js --collect-tweets
   ```
 
 #### Web 服务 (index.js)

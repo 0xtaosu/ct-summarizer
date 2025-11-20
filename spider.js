@@ -17,7 +17,7 @@ const axios = require('axios');
 const schedule = require('node-schedule');
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
-const { FOLLOWER_SOURCE_ACCOUNT } = require('./config');
+const { FOLLOWER_SOURCE_ACCOUNT, TWITTER_LIST_IDS } = require('./config');
 
 /**
  * 配置常量
@@ -30,7 +30,8 @@ const SPIDER_CONFIG = {
     MAX_CONCURRENT_REQUESTS: 10,           // 最大并发请求数
     MAX_TWEETS_PER_REQUEST: 100,           // 每次获取推文数量
     MAX_FOLLOWINGS_PER_REQUEST: 70,        // 每次获取关注列表数量
-    FOLLOWER_SOURCE_ACCOUNT: FOLLOWER_SOURCE_ACCOUNT
+    FOLLOWER_SOURCE_ACCOUNT: FOLLOWER_SOURCE_ACCOUNT,
+    TWITTER_LIST_IDS: TWITTER_LIST_IDS
 };
 
 const logger = createLogger('spider');
@@ -78,6 +79,7 @@ class TwitterPoller {
             nextRunTime: null,
             totalTweetsCollected: 0,
             usersCounted: 0,
+            listsCounted: 0,
             lastFollowerUpdate: null,
             totalFollowersTracked: 0
         };
@@ -740,7 +742,7 @@ class TwitterPoller {
 
         // 确保legacy属性存在
         if (!tweet.legacy) {
-            logger.error(`推文 ${tweet.rest_id || 'unknown'} 缺少legacy属性`);
+            logger.warn(`推文 ${tweet.rest_id || tweet.id || 'unknown'} 缺少legacy属性，已跳过`);
             return null;
         }
 
@@ -1132,6 +1134,76 @@ class TwitterPoller {
     }
 
     /**
+     * 获取所有配置的Twitter列表推文
+     * @param {string[]} [listIds=SPIDER_CONFIG.TWITTER_LIST_IDS] - 要拉取的列表ID
+     * @returns {Promise<Object>} 统计信息
+     */
+    async pollAllLists(listIds = SPIDER_CONFIG.TWITTER_LIST_IDS) {
+        const runStats = {
+            startTime: new Date(),
+            endTime: null,
+            totalTweets: 0,
+            listsProcessed: 0,
+            errors: 0,
+            listResults: []
+        };
+
+        const targets = listIds && listIds.length ? listIds : [];
+        if (targets.length === 0) {
+            logger.warn('没有配置需要拉取的Twitter列表ID');
+            runStats.endTime = new Date();
+            return runStats;
+        }
+
+        logger.info(`开始拉取 ${targets.length} 个Twitter列表的推文...`);
+
+        for (const listId of targets) {
+            try {
+                const tweets = await this.getListTimeline(listId, SPIDER_CONFIG.MAX_TWEETS_PER_REQUEST);
+
+                let saveStats = { new: 0, updated: 0, skipped: 0 };
+                if (tweets.length > 0) {
+                    saveStats = await this.dbManager.saveTweetsToDatabase(tweets);
+                    logger.info(`列表 ${listId} 推文保存完成: 新增 ${saveStats.new}, 更新 ${saveStats.updated}, 跳过 ${saveStats.skipped}`);
+                } else {
+                    logger.warn(`列表 ${listId} 未获取到推文`);
+                }
+
+                runStats.totalTweets += tweets.length;
+                runStats.listsProcessed++;
+                runStats.listResults.push({
+                    listId,
+                    success: true,
+                    tweetsCount: tweets.length,
+                    newTweets: saveStats.new,
+                    updatedTweets: saveStats.updated
+                });
+            } catch (error) {
+                logger.error(`获取列表 ${listId} 的推文时出错: ${error.message}`);
+                runStats.errors++;
+                runStats.listResults.push({
+                    listId,
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
+
+        runStats.endTime = new Date();
+        const duration = (runStats.endTime.getTime() - runStats.startTime.getTime()) / 1000;
+
+        logger.info(`=== 列表拉取完成 ===`);
+        logger.info(`处理列表: ${runStats.listsProcessed}/${targets.length}`);
+        logger.info(`获取推文: ${runStats.totalTweets}条`);
+        logger.info(`错误数量: ${runStats.errors}`);
+        logger.info(`总用时: ${duration.toFixed(2)}秒`);
+
+        this.updateStats(runStats);
+
+        return runStats;
+    }
+
+    /**
      * 更新统计信息
      * @param {Object} runStats - 单次运行的统计信息
      * @private
@@ -1140,7 +1212,8 @@ class TwitterPoller {
         this.stats.totalRuns++;
         this.stats.lastRunTime = runStats.endTime;
         this.stats.totalTweetsCollected += runStats.totalTweets;
-        this.stats.usersCounted += runStats.usersProcessed;
+        this.stats.usersCounted += runStats.usersProcessed || 0;
+        this.stats.listsCounted = (this.stats.listsCounted || 0) + (runStats.listsProcessed || 0);
 
         // 计算下次运行时间 (下一个整点)
         const now = new Date();
@@ -1159,19 +1232,19 @@ class TwitterPoller {
      * 启动定时轮询服务
      */
     startPolling() {
-        // 立即执行一次数据采集
-        logger.info('服务启动，立即执行首次数据采集...');
-        this.pollAllUsers().then(() => {
-            logger.info('首次数据采集完成，已设置定时任务');
+        // 立即执行一次列表数据采集
+        logger.info('服务启动，立即执行首次列表数据采集...');
+        this.pollAllLists().then(() => {
+            logger.info('首次列表数据采集完成，已设置定时任务');
         }).catch(error => {
-            logger.error(`首次数据采集失败: ${error.message}`);
+            logger.error(`首次列表数据采集失败: ${error.message}`);
         });
 
         // 配置定时任务 - 每小时整点执行
         const job = schedule.scheduleJob(SPIDER_CONFIG.POLL_INTERVAL, async () => {
             const now = new Date();
-            logger.info(`=== 开始定时数据采集 (${now.toLocaleString()}) ===`);
-            await this.pollAllUsers();
+            logger.info(`=== 开始定时列表数据采集 (${now.toLocaleString()}) ===`);
+            await this.pollAllLists();
         });
 
         if (job) {
@@ -1190,8 +1263,8 @@ class TwitterPoller {
      * @returns {Promise<Object>} 运行统计信息
      */
     async test() {
-        logger.info('=== 开始测试数据获取 ===');
-        const stats = await this.pollAllUsers();
+        logger.info('=== 开始测试列表数据获取 ===');
+        const stats = await this.pollAllLists();
         logger.info('=== 测试运行完成 ===');
         return stats;
     }
@@ -1424,7 +1497,7 @@ function main() {
         }
 
         // 为其他命令创建需要API的采集器实例
-const poller = new TwitterPoller();
+        const poller = new TwitterPoller();
 
         // 处理获取关注列表的命令
         if (args.includes('--fetch-followings')) {
@@ -1565,19 +1638,19 @@ const poller = new TwitterPoller();
             poller.test();
         } else if (process.env.MANUAL_RUN === 'true') {
             logger.info('手动运行采集任务...');
-            poller.pollAllUsers().then(() => {
+            poller.pollAllLists().then(() => {
                 logger.info('采集任务完成，退出程序');
                 poller.close();
-        process.exit(0);
-    }).catch(error => {
+                process.exit(0);
+            }).catch(error => {
                 logger.error('采集任务失败:', error);
                 poller.close();
-        process.exit(1);
-    });
-} else {
+                process.exit(1);
+            });
+        } else {
             // 正常模式：启动定时任务
             logger.info('以定时任务模式运行...');
-    poller.startPolling();
+            poller.startPolling();
 
             // 注册进程退出处理
             process.on('SIGINT', () => {
