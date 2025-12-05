@@ -398,12 +398,6 @@
         <header>
             <h1>Twitter Hourly</h1>
         </header>
-        
-        <div class="period-tabs">
-            <button id="tab1hour" class="period-tab active">1小时</button>
-            <button id="tab12hours" class="period-tab">12小时</button>
-            <button id="tab1day" class="period-tab">24小时</button>
-        </div>
 
         <div id="summary" class="card">
             <p style="text-align: center; color: var(--muted-color);">正在加载总结...</p>
@@ -424,9 +418,6 @@
             </div>
             <ul id="timeline-list" class="timeline-list">
                 <!-- 时间线项目将通过JavaScript动态插入 -->
-                <li class="timeline-item" style="text-align:center; color:var(--muted-color);">
-                    加载中...
-                </li>
             </ul>
             <button id="load-more" class="load-more">加载更多</button>
         </div>
@@ -461,8 +452,6 @@
             const dataCountDiv = document.getElementById('dataCount');
             const refreshBtn = document.getElementById('refreshBtn');
             const tab1hour = document.getElementById('tab1hour');
-            const tab12hours = document.getElementById('tab12hours');
-            const tab1day = document.getElementById('tab1day');
             const timelineList = document.getElementById('timeline-list');
             const loadMoreBtn = document.getElementById('load-more');
 
@@ -478,19 +467,13 @@
              * @param {string} period - 要激活的时间段
              */
             function setActiveTab(period) {
-                tab1hour.classList.remove('active');
-                tab12hours.classList.remove('active');
-                tab1day.classList.remove('active');
-
                 if (period === '1hour') tab1hour.classList.add('active');
-                else if (period === '12hours') tab12hours.classList.add('active');
-                else if (period === '1day') tab1day.classList.add('active');
             }
 
             // 初始化加载总结
             loadSummary('1hour');
             // 初始化加载历史记录
-            loadHistory('1hour');
+            loadHistory('1hour', true);
 
             // 绑定时间段切换事件
             tab1hour.addEventListener('click', function () {
@@ -504,27 +487,7 @@
                 }
             });
 
-            tab12hours.addEventListener('click', function () {
-                if (currentPeriod !== '12hours') {
-                    currentPeriod = '12hours';
-                    setActiveTab(currentPeriod);
-                    loadSummary(currentPeriod);
-                    // 重置并加载该时间段的历史记录
-                    historyPage = 1;
-                    loadHistory(currentPeriod, true);
-                }
-            });
 
-            tab1day.addEventListener('click', function () {
-                if (currentPeriod !== '1day') {
-                    currentPeriod = '1day';
-                    setActiveTab(currentPeriod);
-                    loadSummary(currentPeriod);
-                    // 重置并加载该时间段的历史记录
-                    historyPage = 1;
-                    loadHistory(currentPeriod, true);
-                }
-            });
 
             // 加载更多按钮点击事件
             loadMoreBtn.addEventListener('click', function () {
@@ -586,23 +549,22 @@
                      * @returns {string} 格式化的北京时间字符串
                      */
                     const formatToBeiJingTime = (date) => {
-                        // 创建一个新日期并加上8小时时差
-                        const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-                        return beijingDate.toLocaleString('zh-CN', {
+                        return date.toLocaleString('zh-CN', {
                             year: 'numeric',
                             month: '2-digit',
                             day: '2-digit',
                             hour: '2-digit',
                             minute: '2-digit',
                             second: '2-digit',
-                            hour12: false
+                            hour12: false,
+                            timeZone: 'Asia/Shanghai'
                         });
                     };
 
                     // 从API获取最新总结
                     const response = await fetchWithTimeout(`/api/summary/${period}`);
-                
-                if (!response.ok) {
+
+                    if (!response.ok) {
                         let errorMessage = `HTTP错误：${response.status}`;
 
                         try {
@@ -617,7 +579,7 @@
                     }
 
                     // 解析JSON响应
-                const data = await response.json();
+                    const data = await response.json();
                     console.log('API返回数据:', data);
 
                     // 检查返回的数据格式
@@ -625,9 +587,9 @@
                         console.error('无效数据格式:', data);
                         throw new Error('API返回数据格式无效');
                     }
-                
-                // 更新界面
-                summaryDiv.innerHTML = data.summary;
+
+                    // 更新界面
+                    summaryDiv.innerHTML = data.summary;
 
                     // 格式化时间戳和时间范围
                     // 优先使用后端的格式化时间
@@ -719,24 +681,18 @@
                         const startTime = new Date(item.start_time);
                         const endTime = new Date(item.end_time);
 
-                        // 计算中国时区的时间 (UTC+8)
-                        const beijingStartTime = new Date(startTime.getTime() + 8 * 60 * 60 * 1000);
-                        const beijingEndTime = new Date(endTime.getTime() + 8 * 60 * 60 * 1000);
-
                         // 构建时间段键（格式：小时:00～小时:00）
-                        const startHour = beijingStartTime.getHours().toString().padStart(2, '0');
-                        const endHour = beijingEndTime.getHours().toString().padStart(2, '0');
+                        const startHour = startTime.toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' });
+                        const endHour = endTime.toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' });
                         const timeRangeKey = `${startHour}:00～${endHour}:00`;
 
                         // 若Map中不存在该键或当前记录的创建时间比Map中已有记录新，则更新Map
                         if (!timeRangeMap.has(timeRangeKey) ||
                             new Date(item.created_at) > new Date(timeRangeMap.get(timeRangeKey).created_at)) {
                             // 添加格式化后的时间信息到item
-                            item.beijingStartTime = beijingStartTime;
-                            item.beijingEndTime = beijingEndTime;
                             item.timeRangeStr = timeRangeKey;
-                            item.dateStr = beijingStartTime.toLocaleDateString('zh-CN', {
-                                year: 'numeric', month: '2-digit', day: '2-digit'
+                            item.dateStr = startTime.toLocaleDateString('zh-CN', {
+                                year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Shanghai'
                             });
 
                             timeRangeMap.set(timeRangeKey, item);
@@ -827,7 +783,7 @@
                     loadMoreBtn.disabled = false;
                     loadMoreBtn.textContent = '加载更多';
 
-            } catch (error) {
+                } catch (error) {
                     console.error('获取历史记录失败:', error);
 
                     // 如果是第一页，显示错误信息

@@ -17,7 +17,7 @@ const axios = require('axios');
 const schedule = require('node-schedule');
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
-const { FOLLOWER_SOURCE_ACCOUNT, TWITTER_LIST_IDS } = require('./config');
+const { FOLLOWER_SOURCE_ACCOUNT, TWITTER_LIST_IDS, CRON_SCHEDULES } = require('./config');
 
 /**
  * 配置常量
@@ -25,7 +25,7 @@ const { FOLLOWER_SOURCE_ACCOUNT, TWITTER_LIST_IDS } = require('./config');
 const SPIDER_CONFIG = {
     API_BASE_URL: 'https://twitter241.p.rapidapi.com',
     RAPIDAPI_HOST: 'twitter241.p.rapidapi.com',
-    POLL_INTERVAL: '0 * * * *',           // 定时任务：每小时整点执行
+    POLL_INTERVAL: CRON_SCHEDULES.SPIDER_POLL_INTERVAL,           // 定时任务：每小时整点执行
     API_REQUEST_DELAY: 100,                // API请求间隔（毫秒）
     MAX_CONCURRENT_REQUESTS: 10,           // 最大并发请求数
     MAX_TWEETS_PER_REQUEST: 100,           // 每次获取推文数量
@@ -57,14 +57,14 @@ class TwitterPoller {
         } else {
             // 初始化RapidAPI客户端
             this.apiKey = process.env.RAPIDAPI_KEY;
-        if (!this.apiKey) {
+            if (!this.apiKey) {
                 throw new Error("RAPIDAPI_KEY not found in environment variables");
-        }
+            }
 
             // 创建API客户端
-        this.client = axios.create({
+            this.client = axios.create({
                 baseURL: SPIDER_CONFIG.API_BASE_URL,
-            headers: {
+                headers: {
                     'x-rapidapi-key': this.apiKey,
                     'x-rapidapi-host': SPIDER_CONFIG.RAPIDAPI_HOST
                 },
@@ -105,7 +105,7 @@ class TwitterPoller {
         // 包含指定键的数组
         if (arrayKey && data[arrayKey] && Array.isArray(data[arrayKey])) {
             return data[arrayKey];
-    }
+        }
 
         // 包含在 result 中
         if (data.result) {

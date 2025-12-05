@@ -23,7 +23,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const { createLogger } = require('./logger');
 const { DatabaseManager } = require('./data');
-const { SYSTEM_PROMPT, AI_CONFIG } = require('./config');
+const { SYSTEM_PROMPT, AI_CONFIG, CRON_SCHEDULES } = require('./config');
 
 const logger = createLogger('summary');
 
@@ -42,16 +42,15 @@ const TimeUtil = {
      * @returns {string} 格式化的北京时间（如："2025/01/15 14:30:00"）
      */
     formatToBeiJingTime(date) {
-        // 创建一个新日期并加上8小时时差
-        const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-        return beijingDate.toLocaleString('zh-CN', {
+        return date.toLocaleString('zh-CN', {
             year: 'numeric',
             month: '2-digit',
             day: '2-digit',
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
-            hour12: false
+            hour12: false,
+            timeZone: 'Asia/Shanghai'
         });
     },
 
@@ -116,13 +115,9 @@ const TimeUtil = {
             queryStart = new Date(lastHour.getTime() - timeDelta);
         }
 
-        // 创建北京时间版本（UTC+8）
-        const beijingStart = new Date(queryStart.getTime() + 8 * 60 * 60 * 1000);
-        const beijingEnd = new Date(queryEnd.getTime() + 8 * 60 * 60 * 1000);
-
         // 格式化北京时间，确保小时值使用两位数字
-        const beijingStartHour = beijingStart.getHours().toString().padStart(2, '0');
-        const beijingEndHour = beijingEnd.getHours().toString().padStart(2, '0');
+        const beijingStartHour = queryStart.toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' });
+        const beijingEndHour = queryEnd.toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' });
         const beijingTimeRange = `${beijingStartHour}:00～${beijingEndHour}:00`;
 
         return {
@@ -280,22 +275,12 @@ class TwitterSummarizer {
      */
     scheduleJobs() {
         // 每小时在x:10分时生成1小时总结（例如1:10, 2:10, 3:10...）
-        schedule.scheduleJob('10 * * * *', async () => {
+        schedule.scheduleJob(CRON_SCHEDULES.SUMMARY_1HOUR, async () => {
             logger.info('执行定时任务: 生成1小时总结');
             await this.generateAndSaveSummary('1hour', { trigger: 'cron' });
         });
 
-        // 每12小时在x:10分时生成12小时总结 (每天0:10和12:10)
-        schedule.scheduleJob('10 0,12 * * *', async () => {
-            logger.info('执行定时任务: 生成12小时总结');
-            await this.generateAndSaveSummary('12hours', { trigger: 'cron' });
-        });
 
-        // 每24小时在0:10生成1天总结 (每天0:10)
-        schedule.scheduleJob('10 0 * * *', async () => {
-            logger.info('执行定时任务: 生成1天总结');
-            await this.generateAndSaveSummary('1day', { trigger: 'cron' });
-        });
 
         logger.info('已设置定时总结任务');
     }
@@ -982,24 +967,21 @@ function _formatSummaryResponse(summary) {
     const startTime = new Date(summary.start_time);
     const endTime = new Date(summary.end_time);
 
-    // 计算中国时区的时间 (UTC+8)
-    const beijingStartTime = new Date(startTime.getTime() + 8 * 60 * 60 * 1000);
-    const beijingEndTime = new Date(endTime.getTime() + 8 * 60 * 60 * 1000);
-
     // 格式化开始和结束的小时为两位数
-    const startHour = beijingStartTime.getHours().toString().padStart(2, '0');
-    const endHour = beijingEndTime.getHours().toString().padStart(2, '0');
+    const startHour = startTime.toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' });
+    const endHour = endTime.toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' });
     const timeRange = `${startHour}:00～${endHour}:00`;
 
     // 格式化完整的北京时间显示
-    const formattedTime = beijingStartTime.toLocaleString('zh-CN', {
+    const formattedTime = startTime.toLocaleString('zh-CN', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
-        hour12: false
+        hour12: false,
+        timeZone: 'Asia/Shanghai'
     });
 
     return {

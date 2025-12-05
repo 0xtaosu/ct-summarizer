@@ -69,11 +69,28 @@ const AI_CONFIG = {
   temperature: 0.7           // 平衡创造性和准确性
 };
 
+
+
+// ==================== 定时任务配置 ====================
+
+/**
+ * 定时任务调度配置 (Cron表达式)
+ * @constant {Object}
+ */
+const CRON_SCHEDULES = {
+  // 爬虫任务
+  SPIDER_POLL_INTERVAL: '0 * * * *',      // 每小时整点执行爬取
+
+  // AI总结任务
+  SUMMARY_1HOUR: '10 * * * *',            // 每小时x:10分生成1小时总结
+};
+
 // ==================== 模块导出 ====================
 
 module.exports = {
   FOLLOWER_SOURCE_ACCOUNT,
   TWITTER_LIST_IDS,
   SYSTEM_PROMPT,
-  AI_CONFIG
+  AI_CONFIG,
+  CRON_SCHEDULES
 };
